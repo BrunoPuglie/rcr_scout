@@ -97,11 +97,11 @@ echo        Depending on your internet speed, this may take 3-7 minutes).
 echo ============================================================================
 echo.
 
-call "%CONDA_BAT%" env create -f "%~dp0environment.yml"
+call "%CONDA_BAT%" env create -f "%~dp0environment_conda.yml"
 if errorlevel 1 (
     echo.
     echo [INFO] Environment may already exist or needs package update. Updating...
-    call "%CONDA_BAT%" env update -f "%~dp0environment.yml" --prune
+    call "%CONDA_BAT%" env update -f "%~dp0environment_conda.yml" --prune
 )
 
 echo.

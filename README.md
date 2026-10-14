@@ -82,8 +82,9 @@ rcr_scout/
 │
 ├── USER_GUIDE.md                   # Comprehensive step-by-step user manual
 ├── README.md                       # Platform overview and quick reference
-├── environment.yml                 # Complete Conda environment specification
-├── requirements.txt                # Python package list
+├── environment_conda.yml           # Complete Conda environment specification (for Windows setup)
+├── requirements.txt                # Python package list (for Streamlit Cloud & Pip)
+├── packages.txt                    # System Linux C-libraries (for Streamlit Cloud)
 │
 ├── app/
 │   ├── app.py                      # Streamlit interactive application

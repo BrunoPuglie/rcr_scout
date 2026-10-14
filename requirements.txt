@@ -1,5 +1,5 @@
 # Python dependencies for Soybean RCR Scouting Platform
-# Note: For Windows, using Conda / Miniforge with environment.yml is recommended
+# Note: For Windows, using Conda / Miniforge with environment_conda.yml is recommended
 # to resolve native GDAL/PROJ C++ runtime DLLs automatically.
 
 streamlit>=1.38.0
