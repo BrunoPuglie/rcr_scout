@@ -1,7 +1,7 @@
 """
 app.py
 ======
-RCRC - Automated scouting platform
+RCR scouting
 Smart Plant Pathology Lab — University of Illinois Urbana-Champaign
 
 Architecture Note (Windows Conda Stability):
@@ -277,7 +277,7 @@ def render_crisp_figure(
 # ==============================================================================
 
 st.set_page_config(
-    page_title="RCRC - Automated scouting platform",
+    page_title="RCR scouting",
     page_icon="🛰️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -575,7 +575,7 @@ st.markdown(
     """
     <div class="md-hero-card">
         <div>
-            <div class="md-hero-title">RCRC - Automated scouting platform</div>
+            <div class="md-hero-title">RCR scouting</div>
             <p class="md-hero-subtitle">
                 Upload field boundary &amp; soybean season &rarr; Extract continuous Sentinel-2 NDVI trajectory &rarr;
                 Generate PlanetScope RCR probability &amp; classification maps
@@ -1691,7 +1691,7 @@ st.markdown(
     """
     <div class="md-footer">
         <div>
-            <b style="color:#13294B;">RCRC - Automated scouting platform</b> &mdash;
+            <b style="color:#13294B;">RCR scouting</b> &mdash;
             Smart Plant Pathology Lab, Department of Crop Sciences, University of Illinois Urbana-Champaign
         </div>
         <div>
