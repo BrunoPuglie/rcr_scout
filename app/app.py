@@ -47,7 +47,7 @@ DEFAULT_GEE_PROJECT = (
     or ("ee-brunodp385" if os.environ.get("USERNAME", "").lower() == "brunodp" else "")
 )
 OPTIMAL_THRESHOLD = 0.48
-TARGET_DROP_RATIO = 0.75
+TARGET_DROP_RATIO = 0.80
 
 
 def get_session_workdir() -> Path:
@@ -55,6 +55,25 @@ def get_session_workdir() -> Path:
     if "session_workdir" not in st.session_state or not Path(st.session_state["session_workdir"]).exists():
         st.session_state["session_workdir"] = tempfile.mkdtemp(prefix="rcr_session_")
     return Path(st.session_state["session_workdir"])
+
+
+def get_library_boundary_files() -> Dict[str, Path]:
+    """Finds all available pre-loaded field boundary files in workspace/field_boundaries, sample_data, and project folders."""
+    search_dirs = [
+        WORKSPACE_DIR / "field_boundaries",
+        STANDALONE_ROOT / "sample_data",
+        STANDALONE_ROOT.parent / "rcrc" / "data" / "raw" / "vectors" / "field_boudaries",
+        STANDALONE_ROOT.parent / "rcrc" / "data" / "raw" / "vectors" / "field_boundaries",
+    ]
+    files_map = {}
+    for sdir in search_dirs:
+        if sdir.exists():
+            for p in sorted(sdir.glob("*.shp")) + sorted(sdir.glob("*.geojson")) + sorted(sdir.glob("*.gpkg")):
+                clean_name = re.sub(r"^(boun[d]?|boundary|field)[_-]?", "", p.stem, flags=re.IGNORECASE).strip().upper()
+                label = f"{clean_name} ({p.name})"
+                if label not in files_map:
+                    files_map[label] = p
+    return files_map
 
 
 def _build_conda_worker_env() -> Dict[str, str]:
@@ -540,7 +559,7 @@ with st.sidebar:
         max_value=90,
         value=int(TARGET_DROP_RATIO * 100),
         step=5,
-        help="75% of peak canopy NDVI along the continuous trajectory line is the optimal scouting point for red crown rot.",
+        help="80% of peak canopy NDVI along the continuous trajectory line is the optimal scouting point for red crown rot.",
     )
     mask_sigma = st.slider(
         "Early canopy mask threshold (SD below mean)",
@@ -594,22 +613,54 @@ st.markdown(
 # Container placed ABOVE the inputs so Field ID, area metrics, and polygon preview appear on top
 step1_preview_container = st.container()
 
-uploaded_polys = st.file_uploader(
-    "Upload your field boundary polygon (.shp, .gpkg, .geojson, .kml, or .zip):",
-    type=["gpkg", "geojson", "json", "kml", "shp", "shx", "dbf", "prj", "cpg", "zip"],
-    accept_multiple_files=True,
+lib_boundaries = get_library_boundary_files()
+
+boundary_mode = st.radio(
+    "Field boundary source:",
+    options=[
+        "📁 Select from Field Library (18 pre-loaded research fields)",
+        "📤 Upload custom boundary files (.shp, .zip, .geojson, .gpkg, .kml)",
+    ],
+    index=0 if lib_boundaries else 1,
+    horizontal=True,
+    key="boundary_source_mode",
 )
 
+target_vector_path: Optional[Path] = None
 inferred_default_fid = "FIELD_1"
-if uploaded_polys:
-    primary_up = next(
-        (f for f in uploaded_polys if Path(f.name).suffix.lower() in (".shp", ".gpkg", ".geojson", ".json", ".kml", ".zip")),
-        uploaded_polys[0],
+selected_lib_path: Optional[Path] = None
+uploaded_polys = None
+
+if boundary_mode.startswith("📁") and lib_boundaries:
+    default_idx = next((i for i, k in enumerate(lib_boundaries.keys()) if "PC3" in k), 0)
+    selected_label = st.selectbox(
+        "Choose field boundary polygon:",
+        options=list(lib_boundaries.keys()),
+        index=default_idx,
+        key="selected_library_field",
     )
+    selected_lib_path = lib_boundaries[selected_label]
+    target_vector_path = selected_lib_path
     inferred_default_fid = (
-        re.sub(r"^(boun[d]?|boundary|field)[_-]?", "", Path(primary_up.name).stem, flags=re.IGNORECASE).upper()
+        re.sub(r"^(boun[d]?|boundary|field)[_-]?", "", selected_lib_path.stem, flags=re.IGNORECASE).strip().upper()
         or "FIELD_1"
     )
+else:
+    uploaded_polys = st.file_uploader(
+        "Upload your field boundary polygon (.shp, .gpkg, .geojson, .kml, or .zip):",
+        type=["gpkg", "geojson", "json", "kml", "shp", "shx", "dbf", "prj", "cpg", "zip"],
+        accept_multiple_files=True,
+        help="Upload a .zip containing the shapefile files, or individual .shp + .shx + .dbf + .prj files.",
+    )
+    if uploaded_polys:
+        primary_up = next(
+            (f for f in uploaded_polys if Path(f.name).suffix.lower() in (".shp", ".gpkg", ".geojson", ".json", ".kml", ".zip")),
+            uploaded_polys[0],
+        )
+        inferred_default_fid = (
+            re.sub(r"^(boun[d]?|boundary|field)[_-]?", "", Path(primary_up.name).stem, flags=re.IGNORECASE).upper()
+            or "FIELD_1"
+        )
 
 season_options = [2026, 2025, 2024, 2023, 2022]
 
@@ -628,7 +679,10 @@ with c2:
         key=f"season_select_{inferred_default_fid}",
     )
 
-if uploaded_polys:
+new_sig = None
+if boundary_mode.startswith("📁") and selected_lib_path:
+    new_sig = f"lib:{selected_lib_path.name}:{field_id_input}"
+elif uploaded_polys:
     sig_parts = [field_id_input]
     for uf in sorted(uploaded_polys, key=lambda x: x.name):
         raw_b = uf.getvalue()
@@ -658,23 +712,25 @@ if uploaded_polys:
         )
         if candidates:
             target_vector_path = candidates[0]
-            with st.spinner("Reading field boundary polygon..."):
-                try:
-                    res = run_worker({
-                        "action": "load_polygon",
-                        "input_path": str(target_vector_path),
-                        "field_id": field_id_input,
-                    })
-                    st.session_state["poly_info"] = res
-                    st.session_state["poly_sig"] = new_sig
-                    st.session_state["pheno_res"] = None
-                    st.session_state["planet_search_res"] = None
-                    st.session_state["run_res"] = None
-                except Exception as e:
-                    st.session_state["poly_info"] = None
-                    st.error(f"Could not read field boundary: {e}")
         else:
             st.warning("Please include the `.shp`, `.gpkg`, `.geojson`, `.kml`, or `.zip` geometry file.")
+
+if target_vector_path and new_sig and new_sig != st.session_state["poly_sig"]:
+    with st.spinner("Reading field boundary polygon..."):
+        try:
+            res = run_worker({
+                "action": "load_polygon",
+                "input_path": str(target_vector_path),
+                "field_id": field_id_input,
+            })
+            st.session_state["poly_info"] = res
+            st.session_state["poly_sig"] = new_sig
+            st.session_state["pheno_res"] = None
+            st.session_state["planet_search_res"] = None
+            st.session_state["run_res"] = None
+        except Exception as e:
+            st.session_state["poly_info"] = None
+            st.error(f"Could not read field boundary: {e}")
 
 # Render Field ID, area metrics, and polygon figure ABOVE the Step 1 inputs
 pinfo = st.session_state.get("poly_info")

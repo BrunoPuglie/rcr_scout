@@ -140,7 +140,7 @@ def main():
             poly_gdf = _load_geojson_pure(req["boundary_geojson_path"])
             field_id = req["field_id"]
             year = int(req["year"])
-            target_drop_ratio = float(req.get("target_drop_ratio", 0.75))
+            target_drop_ratio = float(req.get("target_drop_ratio", 0.80))
             gee_project = req.get("gee_project") or os.environ.get("EARTHENGINE_PROJECT") or os.environ.get("GEE_PROJECT") or ("ee-brunodp385" if os.environ.get("USERNAME", "").lower() == "brunodp" else "")
             use_cached = bool(req.get("use_cached", True))
 

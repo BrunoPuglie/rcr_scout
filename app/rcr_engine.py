@@ -5,7 +5,7 @@ Core backend engine for the Zero-Experience RCR Field Inspection Platform.
 Integrates:
   1. Field polygon loading & validation (.gpkg, .geojson, .kml, .shp/.zip)
   2. Google Earth Engine Sentinel-2 NDVI season progress curve extraction
-     -> Identifies Peak Canopy Date (t_peak) & 75% Senescence Target Date (t_0),
+     -> Identifies Peak Canopy Date (t_peak) & 80% Senescence Target Date (t_0),
         plus recommended Before (t_-1) and After (t_+1) scouting dates.
   3. Dual PlanetScope Image Acquisition:
      - Option A: Personal Planet API Key (Data API catalog search + Orders API AOI clip & download)
@@ -140,7 +140,7 @@ DEFAULT_GEE_PROJECT = (
     or ("ee-brunodp385" if os.environ.get("USERNAME", "").lower() == "brunodp" else "")
 )
 OPTIMAL_THRESHOLD = 0.48
-TARGET_DROP_RATIO = 0.75  # 75% of peak canopy NDVI
+TARGET_DROP_RATIO = 0.80  # 80% of peak canopy NDVI
 
 # University of Illinois Urbana-Champaign Official Colors
 ILLINI_BLUE = "#13294B"
@@ -423,31 +423,77 @@ def _read_vector_path(path: Path, field_id: Optional[str] = None) -> gpd.GeoData
 
     if path.suffix.lower() == ".shp":
         stem = path.stem
-        for search_folder in [VECTORS_DIR, SAMPLE_VECTORS_DIR]:
-            if search_folder.exists():
-                for ext in [".shp", ".prj", ".shx", ".dbf", ".cpg"]:
-                    local_candidate = search_folder / f"{stem}{ext}"
-                    target_file = path.with_suffix(ext)
-                    if local_candidate.exists():
-                        if not target_file.exists():
-                            shutil.copy2(local_candidate, target_file)
-                        elif ext == ".shp" and _is_null_or_corrupt_shapefile(target_file):
-                            shutil.copy2(local_candidate, target_file)
-                        elif ext != ".shp" and target_file.read_bytes()[:8] == b"\x00" * len(target_file.read_bytes()[:8]):
-                            shutil.copy2(local_candidate, target_file)
+        clean_fid = _infer_field_id_from_name(stem)
+        candidate_stems = [
+            stem,
+            f"Boun_{clean_fid}",
+            f"boun_{clean_fid}",
+            clean_fid,
+            f"field_{clean_fid}",
+            f"Field_{clean_fid}",
+            f"boundary_{clean_fid}",
+        ]
+
+        search_folders = [
+            VECTORS_DIR,
+            SAMPLE_VECTORS_DIR,
+            STANDALONE_ROOT.parent / "rcrc" / "data" / "raw" / "vectors" / "field_boudaries",
+            STANDALONE_ROOT.parent / "rcrc" / "data" / "raw" / "vectors" / "field_boundaries",
+            Path.home() / "OneDrive - University of Illinois - Urbana" / "Projects" / "rcrc" / "data" / "raw" / "vectors" / "field_boudaries",
+            Path.home() / "OneDrive - University of Illinois - Urbana" / "Remote Sensing at UIUC" / "RCR - Soybeans" / "Polygons - RCR Fields",
+        ]
+
+        found_valid_source = False
+        for search_folder in search_folders:
+            if not search_folder.exists():
+                continue
+            for cand_stem in candidate_stems:
+                direct_cand = search_folder / f"{cand_stem}.shp"
+                cands = [direct_cand] if direct_cand.exists() else []
+                if not cands and search_folder.is_dir():
+                    try:
+                        cands = list(search_folder.glob(f"{cand_stem}.shp"))
+                    except Exception:
+                        pass
+                for cand_shp in cands:
+                    if not _is_null_or_corrupt_shapefile(cand_shp):
+                        for ext in [".shp", ".prj", ".shx", ".dbf", ".cpg"]:
+                            src_side = cand_shp.with_suffix(ext)
+                            dst_side = path.with_suffix(ext)
+                            if src_side.exists():
+                                if not dst_side.exists() or (ext == ".shp" and _is_null_or_corrupt_shapefile(dst_side)):
+                                    shutil.copy2(src_side, dst_side)
+                                elif ext != ".shp":
+                                    try:
+                                        sb = dst_side.read_bytes()
+                                        if len(sb) == 0 or all(b == 0 for b in sb):
+                                            shutil.copy2(src_side, dst_side)
+                                    except Exception:
+                                        pass
+                        found_valid_source = True
+                        break
+                if found_valid_source:
+                    break
+            if found_valid_source:
+                break
 
         for side_ext in [".shx", ".prj", ".dbf", ".cpg"]:
             side_p = path.with_suffix(side_ext)
             if side_p.exists():
-                sb = side_p.read_bytes()
-                if len(sb) == 0 or all(b == 0 for b in sb):
-                    side_p.unlink()
+                try:
+                    sb = side_p.read_bytes()
+                    if len(sb) == 0 or all(b == 0 for b in sb):
+                        side_p.unlink()
+                except Exception:
+                    pass
 
         if _is_null_or_corrupt_shapefile(path):
             raise ValueError(
-                f"The file '{path.name}' appears to be an unhydrated OneDrive cloud file (the browser received empty "
-                "placeholder bytes). In Windows File Explorer, right-click the shapefile files and select "
-                "'Always keep on this device' so OneDrive downloads them locally, then upload again."
+                f"The file '{path.name}' is empty or contains zero placeholder bytes (0x00). "
+                "This typically happens when Windows or OneDrive has not finished downloading the file locally, "
+                "or when dragging an unhydrated cloud placeholder into the browser. "
+                "Please verify that the shapefile is downloaded, upload a .zip containing the full shapefile (.shp, .shx, .dbf, .prj), "
+                "or select the field directly from the Field Library."
             )
 
     gdf = gpd.read_file(path)
@@ -500,7 +546,7 @@ def extract_sentinel2_phenology(
     Extracts Sentinel-2 NDVI time series from May 15 to Oct 15 for the given year.
     Identifies along the continuous daily trajectory line:
       - peak_date (t_peak): Peak canopy date for baseline canopy mask
-      - target_date (t_0): Post-peak date where continuous curve crosses 75% of peak NDVI
+      - target_date (t_0): Post-peak date where continuous curve crosses 80% of peak NDVI
       - before_date: Optimal target minus 5 days (t_0 - 5 days) on the continuous curve
       - after_date: Optimal target plus 5 days (t_0 + 5 days) on the continuous curve
     """
@@ -633,7 +679,7 @@ def extract_sentinel2_phenology(
     peak_date = pd.to_datetime(daily_df.loc[peak_idx, "date"])
     peak_ndvi = float(daily_df.loc[peak_idx, "ndvi_line"])
 
-    # 2. Optimal classification point (75% of peak NDVI on the post-peak continuous line)
+    # 2. Optimal classification point (80% of peak NDVI on the post-peak continuous line)
     target_cutoff_ndvi = float(peak_ndvi * target_drop_ratio)
     post_peak_daily = daily_df[daily_df["date"] >= peak_date].copy()
     post_peak_daily["diff"] = (post_peak_daily["ndvi_line"] - target_cutoff_ndvi).abs()
@@ -730,7 +776,7 @@ def plot_phenology_curve(
         label="Sentinel-2 cloud-free observations"
     )
 
-    # 4. Horizontal reference line for 75% peak NDVI cutoff
+    # 4. Horizontal reference line for 80% peak NDVI cutoff
     ax.axhline(
         target_cutoff_ndvi, color="#94A3B8", linestyle="--", alpha=0.65, linewidth=1.1, zorder=2
     )

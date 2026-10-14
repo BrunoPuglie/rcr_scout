@@ -35,7 +35,7 @@ Double-click **`setup_environment.bat`** in this folder.
 ### Why does the platform use Google Earth Engine?
 Step 2 connects to Google Earth Engine to query free public **Sentinel-2** satellite data. It calculates a continuous daily vegetation index (NDVI) trajectory over your field across the soybean season to pinpoint:
 1. **$t_{\text{peak}}$ (Peak Canopy)**: When the crop reached maximum vegetative cover (used to build an early canopy mask).
-2. **$t_0$ (Optimal Target Scouting Date)**: When canopy NDVI drops to 75% of peak (optimal disease expression).
+2. **$t_0$ (Optimal Target Scouting Date)**: When canopy NDVI drops to 80% of peak (optimal disease expression).
 3. **$t_{-1}$ & $t_{+1}$ (±5-Day Window)**: Pre-target and post-target dates.
 
 > 💡 **Important:** Step 2 is completely **optional**! If you already know your scouting dates or already have your PlanetScope imagery, you can skip Step 2 and proceed directly to **Step 3 & 4**.
@@ -90,7 +90,7 @@ Google Earth Engine requires each user to have their own Google Cloud Project ID
 4. It displays 4 recommended scouting dates:
    - **1. Early Baseline Mask ($t_{\text{peak}}$)**: Date of peak canopy growth.
    - **2. Pre-Target Point ($t_{-1}$)**: 5 days before optimal target.
-   - **3. Optimal Target Date ($t_0$)**: Point where the continuous curve crosses 75% of peak NDVI.
+   - **3. Optimal Target Date ($t_0$)**: Point where the continuous curve crosses 80% of peak NDVI.
    - **4. Post-Target Point ($t_{+1}$)**: 5 days after optimal target.
 5. You can download the high-resolution season progress plot (`.png`) for field reports.
 
@@ -137,7 +137,7 @@ You need 8-band Surface Reflectance PlanetScope SuperDove GeoTIFFs (`PSScene` / 
 | Setting | Default | Description |
 | :--- | :---: | :--- |
 | **Google Earth Engine project ID** | User-specific | Your personal Google Cloud/GEE Project ID (e.g. `ee-username`). |
-| **Target senescence cutoff** | **75%** | Percentage of peak canopy NDVI defining the optimal scouting window ($t_0$). |
+| **Target senescence cutoff** | **80%** | Percentage of peak canopy NDVI defining the optimal scouting window ($t_0$). |
 | **Early canopy mask threshold** | **3.0 SD** | Pixels with early baseline NDVI below $(\mu - 3.0\sigma)$ are masked out as non-canopy. |
 | **RCR classification threshold** | **0.48** | Optimal probability cutoff calibrated under spatial cross-validation ($F_1 = 0.948$). |
 

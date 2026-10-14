@@ -14,7 +14,7 @@ The platform is designed for **field agronomists, extension specialists, crop co
 ## 🌟 Key Capabilities
 
 - **Zero-Code Standalone Interface**: Runs locally in your web browser with simple 1-click Windows batch launchers.
-- **Sentinel-2 Phenology Discovery**: Automatically tracks continuous canopy NDVI throughout the season (via Google Earth Engine) to discover optimal disease scouting dates ($t_0$ at 75% peak canopy NDVI) and the baseline peak canopy date ($t_{\text{peak}}$).
+- **Sentinel-2 Phenology Discovery**: Automatically tracks continuous canopy NDVI throughout the season (via Google Earth Engine) to discover optimal disease scouting dates ($t_0$ at 80% peak canopy NDVI) and the baseline peak canopy date ($t_{\text{peak}}$).
 - **Flexible PlanetScope Ingestion**:
   - **Option A**: Drag-and-drop uploaded 8-band Surface Reflectance GeoTIFFs downloaded from Planet Explorer.
   - **Option B**: Automatic cloud-free scene search and polygon-clipped downloading via personal Planet API key.
