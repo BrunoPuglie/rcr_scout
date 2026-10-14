@@ -1,0 +1,30 @@
+{
+    "project": "rcrc_3_1",
+    "model_algorithm": "Logistic Regression (L2)",
+    "training_samples": 2921,
+    "total_fields": 15,
+    "features": [
+        "NormNDVI",
+        "NormGNDVI",
+        "NormNDRE",
+        "NormEVI",
+        "NormCI",
+        "NormCIRe",
+        "NormCSI",
+        "Normb6",
+        "Normb8",
+        "Normb7",
+        "Normb4",
+        "Normb2",
+        "Normb5"
+    ],
+    "optimal_threshold": 0.44,
+    "artifacts": {
+        "probability_model": "rcrc_3_1_probability_model.joblib",
+        "threshold_044_model": "rcrc_3_1_threshold_044_classifier.joblib"
+    },
+    "classes": {
+        "0": "Healthy",
+        "1": "RCR_Diseased"
+    }
+}

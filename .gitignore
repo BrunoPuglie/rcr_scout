@@ -1,0 +1,17 @@
+# Bundled portable environment
+env/
+
+# Runtime workspace files and outputs
+workspace/outputs/
+workspace/satellite_imagery/
+workspace/field_boundaries/
+*.zip
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS artifacts
+.DS_Store
+Thumbs.db
