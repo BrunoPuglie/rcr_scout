@@ -48,9 +48,13 @@ Google Earth Engine requires each user to have their own Google Cloud Project ID
 2. Sign in with your standard Google account.
 3. If prompted to select a Cloud Project, choose **"Create a new Google Cloud Project"** (select "Unpaid / Academic / Research / Personal use").
 4. Google will assign you a Project ID (typically in the format `ee-yourusername` or `your-project-name-12345`).
-5. **Double-click `authenticate_earth_engine.bat`** in this platform folder.
-   - It will open your web browser asking you to authorize Earth Engine.
-   - Once authorized, your computer is set up for all future sessions!
+5. **How to authorize**:
+   - **For Local Windows Users**: Double-click `authenticate_earth_engine.bat` in this folder to authorize via browser.
+   - **For Cloud Web App Users**: 
+     1. Go to the [Google Cloud Service Accounts Console](https://console.cloud.google.com/iam-admin/serviceaccounts).
+     2. Click **+ CREATE SERVICE ACCOUNT** (name it `rcr-web`), assign role **Earth Engine User**, click **Done**.
+     3. Click on the email &rarr; **KEYS** tab &rarr; **ADD KEY** &rarr; **Create new key (JSON)**.
+     4. Upload that `.json` file in the platform's sidebar under *🔑 Earth Engine Access & Credentials*.
 6. In the platform's left sidebar, enter your Project ID in the **Google Earth Engine project ID** field.
 
 ---

@@ -636,6 +636,44 @@ with st.sidebar:
             "- **Personal Account**: Upload a Service Account key (`.json`) or paste your credentials token below.\n"
             "- **No Account**: Skip Step 2! You can proceed directly to **Step 3 (Stage Imagery)**."
         )
+
+        with st.popover("📖 5-Minute Guide for Beginners (Click to read)", use_container_width=True):
+            st.markdown(
+                """
+                ### 🚀 5-Minute Guide to Getting Your GEE Key
+
+                #### 💡 Important: Do you actually need this?
+                If you already downloaded your PlanetScope imagery, **you can completely SKIP Step 2!** You do not need Google Earth Engine to detect or map Red Crown Rot. Proceed directly to **Step 3 (Stage Imagery)**.
+
+                ---
+
+                #### How to get your free Service Account Key (.json):
+                
+                1. **Sign up for Earth Engine (Free)**:
+                   - Go to [code.earthengine.google.com](https://code.earthengine.google.com) and log in with any Google account.
+                   - Select **Unpaid / Academic / Research** use.
+                   - Follow the prompt to create a Google Cloud Project (e.g. `ee-yourname`).
+
+                2. **Find your Project ID**:
+                   - Look at the top-right corner of the Earth Engine screen for your project ID (e.g. `ee-yourname`).
+                   - Paste that into the **Google Earth Engine project ID** field above.
+
+                3. **Generate your free Service Account Key (`.json`)**:
+                   Because this web platform runs in the cloud, Google uses a Service Account key to authenticate your cloud requests:
+                   - Go to the [Google Cloud Service Accounts Console](https://console.cloud.google.com/iam-admin/serviceaccounts).
+                   - Confirm your project is selected in the top dropdown.
+                   - Click **+ CREATE SERVICE ACCOUNT** (name it e.g. `rcr-web` and click *Create and Continue*).
+                   - In the **Role** dropdown, select **Earth Engine** &rarr; **Earth Engine User** (or *Resource Viewer*), then click *Done*.
+                   - Click on the newly created service account email.
+                   - Click the **KEYS** tab at the top &rarr; **ADD KEY** &rarr; **Create new key** &rarr; select **JSON** &rarr; click **Create**.
+                   - A `.json` file will automatically download to your computer!
+
+                4. **Upload the file**:
+                   - Drag & drop that downloaded `.json` file into the box below.
+                   - You are now ready to run Step 2!
+                """
+            )
+
         custom_cred_file = st.file_uploader(
             "Upload Service Account key (.json):",
             type=["json"],
@@ -888,6 +926,46 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+with st.expander("❓ Beginner Guide: How to get a Google Earth Engine account & key (Click to read)", expanded=False):
+    st.markdown(
+        """
+        ### 🚀 5-Minute Earth Engine Guide for Beginners
+
+        #### 💡 Do you actually need this?
+        If you already have your PlanetScope `.tif` imagery, **you can completely SKIP Step 2!** You do not need Google Earth Engine to detect or map Red Crown Rot. Proceed directly to **Step 3 (Stage Imagery)**.
+
+        ---
+
+        #### If you want to use Step 2 (Sentinel-2 Continuous Trajectory):
+        
+        1. **Register for Free Earth Engine Access**:
+           - Open [code.earthengine.google.com](https://code.earthengine.google.com) in your browser and log in with your Google account.
+           - Choose **Unpaid / Academic / Research** use.
+           - Follow the prompt to create a Google Cloud Project (e.g., named `ee-yourname`).
+
+        2. **Find your Project ID**:
+           - In the Earth Engine code editor, look at the top-right corner.
+           - Your project ID will look like `ee-yourname` or `rcr-scout-423101`.
+           - Enter this into the **Google Earth Engine project ID** field in the left sidebar.
+
+        3. **Generate your free Service Account Key (`.json`)**:
+           Because this web platform runs in the cloud, Google uses a private Service Account key file to authenticate your requests:
+           - Open the [Google Cloud Service Accounts Console](https://console.cloud.google.com/iam-admin/serviceaccounts).
+           - Confirm your Earth Engine project is selected in the top dropdown.
+           - Click **+ CREATE SERVICE ACCOUNT** at the top.
+           - Type any name (e.g. `rcr-web`) and click **Create and Continue**.
+           - Under **Select a role**, choose **Earth Engine** &rarr; **Earth Engine User** (or *Resource Viewer*), then click **Done**.
+           - Click on the newly created service account email.
+           - Click the **KEYS** tab at the top &rarr; **ADD KEY** &rarr; **Create new key** &rarr; select **JSON** &rarr; click **Create**.
+           - A `.json` file will automatically download to your computer!
+
+        4. **Upload the file to the platform**:
+           - Open the left sidebar &rarr; expand **🔑 Earth Engine Access & Credentials**.
+           - Drag & drop the downloaded `.json` file into the box.
+           - That's it! Now click **🚀 Run Sentinel-2 analysis** below.
+        """
+    )
 
 run_pheno_btn = st.button(
     "🚀 Run Sentinel-2 NDVI season progress analysis (Google Earth Engine)",
