@@ -52,6 +52,21 @@ os.environ["SHAPE_RESTORE_SHX"] = "YES"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["MPLBACKEND"] = "Agg"
 
+
+def _setup_worker_ee_credentials() -> None:
+    token_str = os.environ.get("EARTHENGINE_TOKEN") or os.environ.get("EARTHENGINE_CREDENTIALS")
+    if token_str:
+        try:
+            ee_dir = Path.home() / ".config" / "earthengine"
+            ee_dir.mkdir(parents=True, exist_ok=True)
+            cred_file = ee_dir / "credentials"
+            cred_file.write_text(token_str, encoding="utf-8")
+        except Exception:
+            pass
+
+
+_setup_worker_ee_credentials()
+
 import json
 import traceback
 from datetime import datetime

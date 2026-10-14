@@ -58,6 +58,35 @@ def _get_default_gee_project() -> str:
     return ""
 
 
+def _setup_cloud_earth_engine_credentials() -> None:
+    """
+    If running on Streamlit Cloud and EARTHENGINE_TOKEN / EARTHENGINE_CREDENTIALS
+    is present in st.secrets, writes it to ~/.config/earthengine/credentials
+    so standard Earth Engine OAuth works seamlessly in the cloud container.
+    """
+    token_str = None
+    try:
+        if hasattr(st, "secrets"):
+            if "EARTHENGINE_TOKEN" in st.secrets:
+                token_str = str(st.secrets["EARTHENGINE_TOKEN"]).strip()
+            elif "EARTHENGINE_CREDENTIALS" in st.secrets:
+                token_str = str(st.secrets["EARTHENGINE_CREDENTIALS"]).strip()
+    except Exception:
+        pass
+    if not token_str:
+        token_str = os.environ.get("EARTHENGINE_TOKEN") or os.environ.get("EARTHENGINE_CREDENTIALS")
+
+    if token_str:
+        try:
+            ee_dir = Path.home() / ".config" / "earthengine"
+            ee_dir.mkdir(parents=True, exist_ok=True)
+            cred_file = ee_dir / "credentials"
+            cred_file.write_text(token_str, encoding="utf-8")
+        except Exception:
+            pass
+
+
+_setup_cloud_earth_engine_credentials()
 DEFAULT_GEE_PROJECT = _get_default_gee_project()
 OPTIMAL_THRESHOLD = 0.48
 TARGET_DROP_RATIO = 0.80
@@ -134,12 +163,16 @@ def _build_conda_worker_env() -> Dict[str, str]:
     # Pass Streamlit secrets for GEE and Planet if present
     try:
         if hasattr(st, "secrets"):
-            if "EARTHENGINE_SERVICE_ACCOUNT" in st.secrets and "EARTHENGINE_SERVICE_ACCOUNT" not in env:
-                env["EARTHENGINE_SERVICE_ACCOUNT"] = str(st.secrets["EARTHENGINE_SERVICE_ACCOUNT"])
-            if "EARTHENGINE_PRIVATE_KEY" in st.secrets and "EARTHENGINE_PRIVATE_KEY" not in env:
-                env["EARTHENGINE_PRIVATE_KEY"] = str(st.secrets["EARTHENGINE_PRIVATE_KEY"])
-            if "PLANET_API_KEY" in st.secrets and "PLANET_API_KEY" not in env:
-                env["PLANET_API_KEY"] = str(st.secrets["PLANET_API_KEY"])
+            for k in [
+                "EARTHENGINE_TOKEN",
+                "EARTHENGINE_CREDENTIALS",
+                "EARTHENGINE_PROJECT",
+                "EARTHENGINE_SERVICE_ACCOUNT",
+                "EARTHENGINE_PRIVATE_KEY",
+                "PLANET_API_KEY",
+            ]:
+                if k in st.secrets and k not in env:
+                    env[k] = str(st.secrets[k])
     except Exception:
         pass
 
