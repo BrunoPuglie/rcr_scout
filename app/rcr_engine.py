@@ -566,7 +566,21 @@ def extract_sentinel2_phenology(
         import ee
         proj_clean = (gee_project or "").strip() or None
         try:
-            if proj_clean:
+            sa_email = os.environ.get("EARTHENGINE_SERVICE_ACCOUNT", "").strip()
+            sa_key = os.environ.get("EARTHENGINE_PRIVATE_KEY", "").strip()
+            creds_json = os.environ.get("EARTHENGINE_CREDENTIALS_JSON", "").strip()
+            if sa_email and sa_key:
+                sa_key_formatted = sa_key.replace("\\n", "\n")
+                credentials = ee.ServiceAccountCredentials(sa_email, key_data=sa_key_formatted)
+                ee.Initialize(credentials, project=proj_clean)
+            elif creds_json:
+                import tempfile
+                with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
+                    tf.write(creds_json)
+                    tf_path = tf.name
+                credentials = ee.ServiceAccountCredentials(None, key_file=tf_path)
+                ee.Initialize(credentials, project=proj_clean)
+            elif proj_clean:
                 ee.Initialize(project=proj_clean)
             else:
                 ee.Initialize()
@@ -581,7 +595,8 @@ def extract_sentinel2_phenology(
                     "1. Enter your personal Google Earth Engine Project ID in the left sidebar settings "
                     "(e.g., 'ee-yourusername' or your Google Cloud Project ID).\n"
                     "2. If you don't have an Earth Engine account yet, register for free at https://code.earthengine.google.com.\n"
-                    "3. Run 'authenticate_earth_engine.bat' in the platform folder to authorize your Google account.\n\n"
+                    "3. For local Windows: run 'authenticate_earth_engine.bat' to authorize.\n"
+                    "   For Streamlit Cloud: set EARTHENGINE_SERVICE_ACCOUNT and EARTHENGINE_PRIVATE_KEY in Secrets.\n\n"
                     "💡 Note: Step 2 is completely optional! If you already have PlanetScope imagery, "
                     "you can skip directly to Step 3 (Stage Imagery) and Step 4 (RCR Classification)."
                 ) from init_err
@@ -589,7 +604,8 @@ def extract_sentinel2_phenology(
                 raise RuntimeError(
                     f"Google Earth Engine credentials not found or expired:\n\n"
                     f"Details: {err_msg}\n\n"
-                    "Please double-click 'authenticate_earth_engine.bat' in the platform folder to authorize your Google account.\n\n"
+                    "For local Windows: double-click 'authenticate_earth_engine.bat' to authorize.\n"
+                    "For Streamlit Cloud: configure EARTHENGINE_SERVICE_ACCOUNT & EARTHENGINE_PRIVATE_KEY in Secrets.\n\n"
                     "💡 Note: Step 2 is completely optional if you already have PlanetScope imagery!"
                 ) from init_err
             else:

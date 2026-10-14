@@ -40,12 +40,25 @@ WORKER_SCRIPT = APP_DIR / "rcr_worker.py"
 
 WORKSPACE_DIR = STANDALONE_ROOT / "workspace"
 SAT_BASE_DIR = WORKSPACE_DIR / "satellite_imagery"
+for _p in [WORKSPACE_DIR, SAT_BASE_DIR, WORKSPACE_DIR / "field_boundaries", WORKSPACE_DIR / "outputs"]:
+    _p.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_GEE_PROJECT = (
-    os.environ.get("EARTHENGINE_PROJECT")
-    or os.environ.get("GEE_PROJECT")
-    or ("ee-brunodp385" if os.environ.get("USERNAME", "").lower() == "brunodp" else "")
-)
+
+def _get_default_gee_project() -> str:
+    env_val = os.environ.get("EARTHENGINE_PROJECT") or os.environ.get("GEE_PROJECT")
+    if env_val:
+        return env_val
+    try:
+        if hasattr(st, "secrets") and "EARTHENGINE_PROJECT" in st.secrets:
+            return str(st.secrets["EARTHENGINE_PROJECT"]).strip()
+    except Exception:
+        pass
+    if os.environ.get("USERNAME", "").lower() == "brunodp":
+        return "ee-brunodp385"
+    return ""
+
+
+DEFAULT_GEE_PROJECT = _get_default_gee_project()
 OPTIMAL_THRESHOLD = 0.48
 TARGET_DROP_RATIO = 0.80
 
@@ -80,10 +93,13 @@ def _build_conda_worker_env() -> Dict[str, str]:
     """
     Builds a clean environment dictionary with Conda's Library\\bin, mingw-w64\\bin,
     and Scripts prepended to PATH so the Windows child process loader resolves all
-    delay-loaded C++ DLLs (preventing 0xC06D007F STATUS_DELAY_LOAD_FAILED).
+    delay-loaded C++ DLLs (preventing 0xC06D007F STATUS_DELAY_LOAD_FAILED), while
+    also configuring Linux / cloud environments properly.
     """
     env = os.environ.copy()
     env_prefix = Path(sys.executable).resolve().parent
+    conda_root = env_prefix.parent if env_prefix.name.lower() in ("bin", "scripts") else env_prefix
+
     conda_dll_dirs = [
         env_prefix,
         env_prefix / "Library" / "mingw-w64" / "bin",
@@ -91,6 +107,7 @@ def _build_conda_worker_env() -> Dict[str, str]:
         env_prefix / "Library" / "bin",
         env_prefix / "Scripts",
         env_prefix / "bin",
+        conda_root / "bin",
     ]
     existing_dirs = [str(d) for d in conda_dll_dirs if d.exists()]
     env["PATH"] = os.pathsep.join(existing_dirs + [env.get("PATH", "")])
@@ -99,8 +116,32 @@ def _build_conda_worker_env() -> Dict[str, str]:
     proj_dir = env_prefix / "Library" / "share" / "proj"
     if gdal_dir.exists():
         env["GDAL_DATA"] = str(gdal_dir)
+    elif (conda_root / "share" / "gdal").exists() and "GDAL_DATA" not in env:
+        env["GDAL_DATA"] = str(conda_root / "share" / "gdal")
+
     if proj_dir.exists():
         env["PROJ_LIB"] = str(proj_dir)
+    elif (conda_root / "share" / "proj").exists() and "PROJ_LIB" not in env:
+        env["PROJ_LIB"] = str(conda_root / "share" / "proj")
+
+    # Pass app paths in PYTHONPATH for cross-platform subprocess importing
+    app_paths = [str(APP_DIR), str(STANDALONE_ROOT)]
+    if "PYTHONPATH" in env and env["PYTHONPATH"]:
+        env["PYTHONPATH"] = os.pathsep.join(app_paths + [env["PYTHONPATH"]])
+    else:
+        env["PYTHONPATH"] = os.pathsep.join(app_paths)
+
+    # Pass Streamlit secrets for GEE and Planet if present
+    try:
+        if hasattr(st, "secrets"):
+            if "EARTHENGINE_SERVICE_ACCOUNT" in st.secrets and "EARTHENGINE_SERVICE_ACCOUNT" not in env:
+                env["EARTHENGINE_SERVICE_ACCOUNT"] = str(st.secrets["EARTHENGINE_SERVICE_ACCOUNT"])
+            if "EARTHENGINE_PRIVATE_KEY" in st.secrets and "EARTHENGINE_PRIVATE_KEY" not in env:
+                env["EARTHENGINE_PRIVATE_KEY"] = str(st.secrets["EARTHENGINE_PRIVATE_KEY"])
+            if "PLANET_API_KEY" in st.secrets and "PLANET_API_KEY" not in env:
+                env["PLANET_API_KEY"] = str(st.secrets["PLANET_API_KEY"])
+    except Exception:
+        pass
 
     env["SHAPE_RESTORE_SHX"] = "YES"
     env["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -966,6 +1007,18 @@ with tab_api:
     )
     api_c1, api_c2, api_c3 = st.columns([1.6, 1.0, 1.0])
     with api_c1:
+        default_pl_key = st.session_state.get("planet_api_key", "")
+        if not default_pl_key:
+            default_pl_key = os.environ.get("PL_API_KEY") or os.environ.get("PLANET_API_KEY") or ""
+            if not default_pl_key:
+                try:
+                    if hasattr(st, "secrets") and "PLANET_API_KEY" in st.secrets:
+                        default_pl_key = str(st.secrets["PLANET_API_KEY"]).strip()
+                except Exception:
+                    pass
+            if default_pl_key:
+                st.session_state["planet_api_key"] = default_pl_key
+
         planet_api_key_raw = st.text_input(
             "Personal Planet API key:",
             value=st.session_state.get("planet_api_key", ""),

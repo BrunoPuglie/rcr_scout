@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # 1. Configure environment variables & DLL directories BEFORE importing any C-extensions
 _ENV_PREFIX = Path(sys.executable).resolve().parent
+_CONDA_ROOT = _ENV_PREFIX.parent if _ENV_PREFIX.name.lower() in ("bin", "scripts") else _ENV_PREFIX
 _CONDA_DLL_DIRS = [
     _ENV_PREFIX,
     _ENV_PREFIX / "Library" / "mingw-w64" / "bin",
@@ -24,6 +25,7 @@ _CONDA_DLL_DIRS = [
     _ENV_PREFIX / "Library" / "bin",
     _ENV_PREFIX / "Scripts",
     _ENV_PREFIX / "bin",
+    _CONDA_ROOT / "bin",
 ]
 _existing_dll_dirs = [str(d) for d in _CONDA_DLL_DIRS if d.exists()]
 os.environ["PATH"] = os.pathsep.join(_existing_dll_dirs + [os.environ.get("PATH", "")])
@@ -38,8 +40,13 @@ _GDAL_CANDIDATE = _ENV_PREFIX / "Library" / "share" / "gdal"
 _PROJ_CANDIDATE = _ENV_PREFIX / "Library" / "share" / "proj"
 if _GDAL_CANDIDATE.exists():
     os.environ["GDAL_DATA"] = str(_GDAL_CANDIDATE)
+elif (_CONDA_ROOT / "share" / "gdal").exists() and "GDAL_DATA" not in os.environ:
+    os.environ["GDAL_DATA"] = str(_CONDA_ROOT / "share" / "gdal")
+
 if _PROJ_CANDIDATE.exists():
     os.environ["PROJ_LIB"] = str(_PROJ_CANDIDATE)
+elif (_CONDA_ROOT / "share" / "proj").exists() and "PROJ_LIB" not in os.environ:
+    os.environ["PROJ_LIB"] = str(_CONDA_ROOT / "share" / "proj")
 
 os.environ["SHAPE_RESTORE_SHX"] = "YES"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
