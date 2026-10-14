@@ -34,16 +34,17 @@ The platform is designed for **field agronomists, extension specialists, crop co
 No command-line expertise is needed. Follow these 3 simple steps:
 
 ### 1. Install Miniforge (One-time)
-If your computer does not have Miniforge or Conda installed:
-- Open PowerShell or Command Prompt, paste this command, and press **Enter**:
+If your computer does not have Miniforge or Conda installed, you have three easy options:
+- **Option A (Fully Automated):** Simply double-click **`setup_environment.bat`** directly — it will detect that Miniforge is missing and offer to install it automatically for you via Windows Package Manager.
+- **Option B (PowerShell / Command Prompt):** Run:
   ```powershell
-  winget install conda-forge.miniforge
+  winget install --id CondaForge.Miniforge3 -e --accept-source-agreements --accept-package-agreements
   ```
-- *Or download the visual installer:* [Miniforge Windows Installer (.exe)](https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Windows-x86_64.exe)
+- **Option C (Visual Installer):** Download and run the official installer: [Miniforge Windows Installer (.exe)](https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Windows-x86_64.exe)
 
 ### 2. Configure Environment (One-time)
 - Double-click **`setup_environment.bat`** in the project folder.
-- This creates the `rcrc_platform` environment with all geospatial, GDAL, and ML libraries.
+- This creates and verifies the `rcrc_platform` environment with all geospatial, GDAL, and ML libraries.
 
 ### 3. Launch Platform
 - Double-click **`launch_platform.bat`**.

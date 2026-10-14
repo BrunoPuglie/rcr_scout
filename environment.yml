@@ -1,7 +1,7 @@
 name: rcrc_platform
 channels:
   - conda-forge
-  - defaults
+  - nodefaults
 dependencies:
   - python=3.11
   - pip
@@ -20,5 +20,6 @@ dependencies:
   - streamlit>=1.38.0
   - requests>=2.32.0
   - openpyxl>=3.1.0
+  - pillow>=10.0.0
   - pip:
       - earthengine-api>=1.4.0

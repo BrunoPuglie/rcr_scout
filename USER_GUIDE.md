@@ -12,21 +12,23 @@ This application enables field agronomists, crop consultants, researchers, and g
 Setting up the platform on a Windows computer takes only a few minutes and is performed once.
 
 ### Step 1.1: Install Miniforge (Free Conda Manager)
-Choose either fast command-line install or the visual installer:
+Choose any of the following options:
 
-- **Option A (Fastest via Terminal / PowerShell):**
+- **Option A (Fully Automated - Recommended):**
+  Simply double-click **`setup_environment.bat`** in this folder! It will detect that Miniforge is missing and offer to install it automatically for you using Windows Package Manager.
+- **Option B (Fastest via Terminal / PowerShell):**
   Open PowerShell or Command Prompt, paste this command, and press **Enter**:
   ```powershell
-  winget install conda-forge.miniforge
+  winget install --id CondaForge.Miniforge3 -e --accept-source-agreements --accept-package-agreements
   ```
-- **Option B (Visual Installer):**
+- **Option C (Visual Installer):**
   Download the installer from:
   👉 [Download Miniforge Windows Installer (.exe)](https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Windows-x86_64.exe)  
   Run the installer, click **Next** &rarr; **Install** with the standard default settings.
 
 ### Step 1.2: One-Click Environment Setup
 Double-click **`setup_environment.bat`** in this folder.  
-*(This automatically downloads and configures the required Python environment with all geospatial, GDAL, machine learning, and web libraries).*
+*(This automatically downloads and configures the required Python environment with all geospatial, GDAL, machine learning, and web libraries, and verifies all packages).*
 
 ---
 

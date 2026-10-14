@@ -15,3 +15,6 @@ __pycache__/
 # OS artifacts
 .DS_Store
 Thumbs.db
+
+# Platform environment cache
+.conda_env_path
