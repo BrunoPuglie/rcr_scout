@@ -134,7 +134,11 @@ DIR_REPORTS = OUTPUT_BASE / "reports"
 for _d in [DIR_CLASSIFIED, DIR_INDICES, DIR_REPORTS, SAT_BASE_DIR, VECTORS_DIR, SAMPLE_VECTORS_DIR]:
     _d.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_GEE_PROJECT = "ee-brunodp385"
+DEFAULT_GEE_PROJECT = (
+    os.environ.get("EARTHENGINE_PROJECT")
+    or os.environ.get("GEE_PROJECT")
+    or ("ee-brunodp385" if os.environ.get("USERNAME", "").lower() == "brunodp" else "")
+)
 OPTIMAL_THRESHOLD = 0.48
 TARGET_DROP_RATIO = 0.75  # 75% of peak canopy NDVI
 
@@ -514,11 +518,40 @@ def extract_sentinel2_phenology(
 
     if df is None:
         import ee
+        proj_clean = (gee_project or "").strip() or None
         try:
-            ee.Initialize(project=gee_project)
-        except Exception:
-            ee.Authenticate()
-            ee.Initialize(project=gee_project)
+            if proj_clean:
+                ee.Initialize(project=proj_clean)
+            else:
+                ee.Initialize()
+        except Exception as init_err:
+            err_msg = str(init_err)
+            if "Not signed up for Earth Engine" in err_msg or "project is not registered" in err_msg or "403" in err_msg:
+                proj_hint = f" '{proj_clean}'" if proj_clean else ""
+                raise RuntimeError(
+                    f"Google Earth Engine connection error for project{proj_hint}:\n\n"
+                    f"Details: {err_msg}\n\n"
+                    "How to resolve this:\n"
+                    "1. Enter your personal Google Earth Engine Project ID in the left sidebar settings "
+                    "(e.g., 'ee-yourusername' or your Google Cloud Project ID).\n"
+                    "2. If you don't have an Earth Engine account yet, register for free at https://code.earthengine.google.com.\n"
+                    "3. Run 'authenticate_earth_engine.bat' in the platform folder to authorize your Google account.\n\n"
+                    "💡 Note: Step 2 is completely optional! If you already have PlanetScope imagery, "
+                    "you can skip directly to Step 3 (Stage Imagery) and Step 4 (RCR Classification)."
+                ) from init_err
+            elif "credentials" in err_msg.lower() or "auth" in err_msg.lower():
+                raise RuntimeError(
+                    f"Google Earth Engine credentials not found or expired:\n\n"
+                    f"Details: {err_msg}\n\n"
+                    "Please double-click 'authenticate_earth_engine.bat' in the platform folder to authorize your Google account.\n\n"
+                    "💡 Note: Step 2 is completely optional if you already have PlanetScope imagery!"
+                ) from init_err
+            else:
+                raise RuntimeError(
+                    f"Google Earth Engine initialization failed:\n\n"
+                    f"Details: {err_msg}\n\n"
+                    "Please verify your Google Earth Engine project ID in the sidebar settings or run 'authenticate_earth_engine.bat'."
+                ) from init_err
 
         poly_geojson = poly_gdf.to_crs("EPSG:4326").geometry.iloc[0].__geo_interface__
         ee_poly = ee.Geometry(poly_geojson)

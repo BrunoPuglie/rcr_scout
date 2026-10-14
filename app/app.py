@@ -41,7 +41,11 @@ WORKER_SCRIPT = APP_DIR / "rcr_worker.py"
 WORKSPACE_DIR = STANDALONE_ROOT / "workspace"
 SAT_BASE_DIR = WORKSPACE_DIR / "satellite_imagery"
 
-DEFAULT_GEE_PROJECT = "ee-brunodp385"
+DEFAULT_GEE_PROJECT = (
+    os.environ.get("EARTHENGINE_PROJECT")
+    or os.environ.get("GEE_PROJECT")
+    or ("ee-brunodp385" if os.environ.get("USERNAME", "").lower() == "brunodp" else "")
+)
 OPTIMAL_THRESHOLD = 0.48
 TARGET_DROP_RATIO = 0.75
 
@@ -522,8 +526,14 @@ with st.sidebar:
         """,
         unsafe_allow_html=True,
     )
-    st.markdown('<div class="md-sidebar-title">⚙️ Platform settings</div>', unsafe_allow_html=True)
-    gee_project = st.text_input("Google Earth Engine project ID", value=DEFAULT_GEE_PROJECT)
+    gee_project_raw = st.text_input(
+        "Google Earth Engine project ID",
+        value=st.session_state.get("gee_project", DEFAULT_GEE_PROJECT),
+        placeholder="e.g. ee-yourusername or gcp-project-id",
+        help="Required for Step 2 Sentinel-2 phenology curve. Enter your personal GEE Project ID (e.g. 'ee-username'). Can be left blank if you already configured a default project via 'earthengine set_project' or if you skip Step 2.",
+    )
+    st.session_state["gee_project"] = gee_project_raw.strip()
+    gee_project = st.session_state["gee_project"]
     target_drop_pct = st.slider(
         "Target senescence cutoff (% of peak NDVI)",
         min_value=60,
@@ -694,6 +704,12 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+st.caption(
+    "💡 **Google Earth Engine Integration:** Extracts free Sentinel-2 satellite observations to calculate canopy NDVI "
+    "and recommend optimal scouting dates. If you haven't set up Earth Engine yet, you can authorize it with "
+    "**`authenticate_earth_engine.bat`**, or skip directly to **Step 3** if you already have your PlanetScope imagery."
+)
+
 run_pheno_btn = st.button(
     "🚀 Run Sentinel-2 NDVI season progress analysis (Google Earth Engine)",
     type="primary",
@@ -716,7 +732,7 @@ if run_pheno_btn and pinfo is not None:
             st.session_state["planet_search_res"] = None
             st.success(f"NDVI season progress curve extracted! Source: {pheno_res['source']}")
         except Exception as e:
-            st.error(f"Sentinel-2 extraction failed: {e}")
+            st.error(f"⚠️ **Sentinel-2 extraction error:**\n\n{e}")
 
 if st.session_state["pheno_res"] is not None:
     pr = st.session_state["pheno_res"]

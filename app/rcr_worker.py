@@ -141,7 +141,7 @@ def main():
             field_id = req["field_id"]
             year = int(req["year"])
             target_drop_ratio = float(req.get("target_drop_ratio", 0.75))
-            gee_project = req.get("gee_project", "ee-brunodp385")
+            gee_project = req.get("gee_project") or os.environ.get("EARTHENGINE_PROJECT") or os.environ.get("GEE_PROJECT") or ("ee-brunodp385" if os.environ.get("USERNAME", "").lower() == "brunodp" else "")
             use_cached = bool(req.get("use_cached", True))
 
             pheno_res = extract_sentinel2_phenology(

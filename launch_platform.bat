@@ -23,19 +23,19 @@ if exist "%~dp0env\python.exe" (
 :: 2. Priority 2: Standard local Miniforge rcrc, rcrc_platform or rcrc_3_1 environment
 if exist "%USERPROFILE%\AppData\Local\miniforge3\envs\rcrc\python.exe" (
     set "ENV_ROOT=%USERPROFILE%\AppData\Local\miniforge3\envs\rcrc"
-    set "ENV_PYTHON=%ENV_ROOT%\python.exe"
+    set "ENV_PYTHON=%USERPROFILE%\AppData\Local\miniforge3\envs\rcrc\python.exe"
     echo [INFO] Found local Miniforge rcrc environment.
     goto :FOUND_ENV
 )
 if exist "%USERPROFILE%\AppData\Local\miniforge3\envs\rcrc_platform\python.exe" (
     set "ENV_ROOT=%USERPROFILE%\AppData\Local\miniforge3\envs\rcrc_platform"
-    set "ENV_PYTHON=%ENV_ROOT%\python.exe"
+    set "ENV_PYTHON=%USERPROFILE%\AppData\Local\miniforge3\envs\rcrc_platform\python.exe"
     echo [INFO] Found local Miniforge rcrc_platform environment.
     goto :FOUND_ENV
 )
 if exist "%USERPROFILE%\AppData\Local\miniforge3\envs\rcrc_3_1\python.exe" (
     set "ENV_ROOT=%USERPROFILE%\AppData\Local\miniforge3\envs\rcrc_3_1"
-    set "ENV_PYTHON=%ENV_ROOT%\python.exe"
+    set "ENV_PYTHON=%USERPROFILE%\AppData\Local\miniforge3\envs\rcrc_3_1\python.exe"
     echo [INFO] Found local Miniforge rcrc_3_1 environment.
     goto :FOUND_ENV
 )
@@ -83,6 +83,8 @@ pause >nul
 exit /b 1
 
 :FOUND_ENV
+if not defined ENV_PYTHON if defined ENV_ROOT set "ENV_PYTHON=%ENV_ROOT%\python.exe"
+if not defined ENV_ROOT if defined ENV_PYTHON for %%D in ("%ENV_PYTHON%\..") do set "ENV_ROOT=%%~fD"
 :: Configure PATH and GDAL/PROJ DLL directories
 set "PATH=%ENV_ROOT%;%ENV_ROOT%\Library\mingw-w64\bin;%ENV_ROOT%\Library\usr\bin;%ENV_ROOT%\Library\bin;%ENV_ROOT%\Scripts;%ENV_ROOT%\bin;%PATH%"
 if exist "%ENV_ROOT%\Library\share\gdal" set "GDAL_DATA=%ENV_ROOT%\Library\share\gdal"
