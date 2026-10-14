@@ -166,6 +166,15 @@ def main():
             gee_project = req.get("gee_project") or os.environ.get("EARTHENGINE_PROJECT") or os.environ.get("GEE_PROJECT") or ("ee-brunodp385" if os.environ.get("USERNAME", "").lower() == "brunodp" else "")
             use_cached = bool(req.get("use_cached", True))
 
+            custom_creds = (req.get("custom_ee_credentials") or "").strip()
+            if custom_creds:
+                if custom_creds.startswith("{") and "private_key" in custom_creds:
+                    os.environ["EARTHENGINE_CREDENTIALS_JSON"] = custom_creds
+                elif custom_creds.startswith("{") and "refresh_token" in custom_creds:
+                    ee_dir = Path.home() / ".config" / "earthengine"
+                    ee_dir.mkdir(parents=True, exist_ok=True)
+                    (ee_dir / "credentials").write_text(custom_creds, encoding="utf-8")
+
             pheno_res = extract_sentinel2_phenology(
                 poly_gdf=poly_gdf,
                 field_id=field_id,

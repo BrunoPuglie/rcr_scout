@@ -627,6 +627,47 @@ with st.sidebar:
     )
     st.session_state["gee_project"] = gee_project_raw.strip()
     gee_project = st.session_state["gee_project"]
+
+    with st.expander("🔑 Earth Engine Access & Credentials", expanded=False):
+        st.markdown(
+            "Step 2 connects to Google Earth Engine to extract public Sentinel-2 satellite data.\n\n"
+            "**Access options:**\n"
+            "- **Platform Default**: If the lab configured access, you can run Step 2 directly.\n"
+            "- **Personal Account**: Upload a Service Account key (`.json`) or paste your credentials token below.\n"
+            "- **No Account**: Skip Step 2! You can proceed directly to **Step 3 (Stage Imagery)**."
+        )
+        custom_cred_file = st.file_uploader(
+            "Upload Service Account key (.json):",
+            type=["json"],
+            help="Upload a Google Cloud Service Account JSON key with Earth Engine permissions.",
+            key="custom_ee_file",
+        )
+        custom_cred_text = st.text_area(
+            "Or paste credentials JSON / Token:",
+            value=st.session_state.get("custom_ee_credentials", ""),
+            placeholder='{"redirect_uri": ...} or {"type": "service_account", ...}',
+            help="Paste your Earth Engine token or service account JSON string here.",
+            key="custom_ee_text",
+            height=90,
+        )
+        resolved_custom_cred = ""
+        if custom_cred_file is not None:
+            try:
+                resolved_custom_cred = custom_cred_file.getvalue().decode("utf-8")
+            except Exception:
+                pass
+        elif custom_cred_text.strip():
+            resolved_custom_cred = custom_cred_text.strip()
+
+        if resolved_custom_cred:
+            st.session_state["custom_ee_credentials"] = resolved_custom_cred
+            st.caption("✅ Custom Earth Engine credentials loaded for this session.")
+
+        st.markdown(
+            "<small style='color:#64748B;'>New to Earth Engine? Register free at "
+            "<a href='https://code.earthengine.google.com' target='_blank'>code.earthengine.google.com</a></small>",
+            unsafe_allow_html=True,
+        )
     target_drop_pct = st.slider(
         "Target senescence cutoff (% of peak NDVI)",
         min_value=60,
@@ -834,10 +875,18 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.caption(
-    "💡 **Google Earth Engine Integration:** Extracts free Sentinel-2 satellite observations to calculate canopy NDVI "
-    "and recommend optimal scouting dates. If you haven't set up Earth Engine yet, you can authorize it with "
-    "**`authenticate_earth_engine.bat`**, or skip directly to **Step 3** if you already have your PlanetScope imagery."
+st.markdown(
+    """
+    <div style="background-color:#F8FAFC; border-left:4px solid #3B82F6; padding:0.8rem 1.1rem; border-radius:6px; margin-bottom:1rem; font-size:0.9rem;">
+        <b>🛰️ About Sentinel-2 Phenology Analysis:</b><br/>
+        This step connects to Google Earth Engine to query Sentinel-2 satellite data over your field to map continuous canopy growth and identify optimal disease scouting dates.<br/>
+        <span style="color:#64748B; font-size:0.85rem;">
+        • <b>Don't have Google Earth Engine?</b> Step 2 is completely optional! You can proceed directly to <b>Step 3</b> to upload PlanetScope imagery.<br/>
+        • <b>Using your own Earth Engine account?</b> Enter your Project ID and credentials in the left sidebar under <i>🔑 Earth Engine Access &amp; Credentials</i>.
+        </span>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
 run_pheno_btn = st.button(
@@ -856,13 +905,27 @@ if run_pheno_btn and pinfo is not None:
                 "year": int(season_input),
                 "target_drop_ratio": target_drop_pct / 100.0,
                 "gee_project": gee_project,
+                "custom_ee_credentials": st.session_state.get("custom_ee_credentials", ""),
                 "use_cached": use_cached_pheno,
             })
             st.session_state["pheno_res"] = pheno_res
             st.session_state["planet_search_res"] = None
             st.success(f"NDVI season progress curve extracted! Source: {pheno_res['source']}")
         except Exception as e:
-            st.error(f"⚠️ **Sentinel-2 extraction error:**\n\n{e}")
+            err_str = str(e)
+            if any(term in err_str.lower() for term in ["credentials not found", "not registered", "not signed up", "403", "connection error"]):
+                st.warning(
+                    "⚠️ **Google Earth Engine Setup Required for Step 2**\n\n"
+                    "The platform was unable to authenticate with Google Earth Engine for this query.\n\n"
+                    "**How would you like to proceed?**\n"
+                    "1. **Skip Step 2 (Recommended if you have PlanetScope imagery)**: You do not need Earth Engine to map Red Crown Rot. Proceed directly to **Step 3 (Stage Imagery)** and **Step 4 (Classification)**.\n"
+                    "2. **Use Your Earth Engine Account**: Open the left sidebar → **🔑 Earth Engine Access & Credentials** to enter your personal Project ID and upload your Service Account key or paste your credentials token.\n"
+                    "3. **Sign Up for Free**: Register a free personal Google Earth Engine account at [code.earthengine.google.com](https://code.earthengine.google.com)."
+                )
+                with st.expander("Show detailed technical error"):
+                    st.code(err_str, language="text")
+            else:
+                st.error(f"⚠️ **Sentinel-2 extraction error:**\n\n{e}")
 
 if st.session_state["pheno_res"] is not None:
     pr = st.session_state["pheno_res"]
