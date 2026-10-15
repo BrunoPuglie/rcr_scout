@@ -235,6 +235,7 @@ def render_crisp_figure(
     use_svg_if_available: bool = True,
     max_height_px: Optional[int] = None,
     max_width_px: Optional[int] = None,
+    full_width: bool = False,
 ) -> None:
     """
     Renders a figure directly via an HTML <img> tag with base64 data URI.
@@ -256,7 +257,9 @@ def render_crisp_figure(
         return
 
     style_parts = ["display:block;", "border-radius:8px;", "margin:0 auto;"]
-    if max_height_px is not None:
+    if full_width:
+        style_parts.append(f"width:100%; height:auto; max-height:{max_height_px or 650}px; object-fit:contain;")
+    elif max_height_px is not None:
         style_parts.append(f"max-height:{max_height_px}px; width:auto; max-width:100%;")
     elif max_width_px is not None:
         style_parts.append(f"width:100%; max-width:{max_width_px}px; height:auto;")
@@ -649,29 +652,29 @@ with st.sidebar:
                 ---
 
                 #### How to get your free Service Account Key (.json):
-                
-                1. **Sign up for Earth Engine (Free)**:
-                   - Go to [code.earthengine.google.com](https://code.earthengine.google.com) and log in with any Google account.
-                   - Select **Unpaid / Academic / Research** use.
-                   - Follow the prompt to create a Google Cloud Project (e.g. `ee-yourname`).
 
-                2. **Find your Project ID**:
-                   - Look at the top-right corner of the Earth Engine screen for your project ID (e.g. `ee-yourname`).
-                   - Paste that into the **Google Earth Engine project ID** field above.
+                ##### Step 1: Sign up for Earth Engine (Free)
+                - Go to [code.earthengine.google.com](https://code.earthengine.google.com) and log in with any Google account.
+                - Select **Unpaid / Academic / Research** use.
+                - Follow the prompt to create a Google Cloud Project (e.g. `ee-yourname`).
 
-                3. **Generate your free Service Account Key (`.json`)**:
-                   Because this web platform runs in the cloud, Google uses a Service Account key to authenticate your cloud requests:
-                   - Go to the [Google Cloud Service Accounts Console](https://console.cloud.google.com/iam-admin/serviceaccounts).
-                   - Confirm your project is selected in the top dropdown.
-                   - Click **+ CREATE SERVICE ACCOUNT** (name it e.g. `rcr-web` and click *Create and Continue*).
-                   - In the **Role** dropdown, select **Earth Engine** &rarr; **Earth Engine User** (or *Resource Viewer*), then click *Done*.
-                   - Click on the newly created service account email.
-                   - Click the **KEYS** tab at the top &rarr; **ADD KEY** &rarr; **Create new key** &rarr; select **JSON** &rarr; click **Create**.
-                   - A `.json` file will automatically download to your computer!
+                ##### Step 2: Find your Project ID
+                - Look at the top-right corner of the Earth Engine screen for your project ID (e.g. `ee-yourname`).
+                - Paste that into the **Google Earth Engine project ID** field above.
 
-                4. **Upload the file**:
-                   - Drag & drop that downloaded `.json` file into the box below.
-                   - You are now ready to run Step 2!
+                ##### Step 3: Generate your free Service Account Key (`.json`)
+                Because this web platform runs in the cloud, Google uses a Service Account key to authenticate your cloud requests:
+                - Go to the [Google Cloud Service Accounts Console](https://console.cloud.google.com/iam-admin/serviceaccounts).
+                - Confirm your project is selected in the top dropdown.
+                - Click **+ CREATE SERVICE ACCOUNT** (name it e.g. `rcr-web` and click *Create and Continue*).
+                - In the **Role** dropdown, select **Earth Engine** → **Earth Engine User** (or *Resource Viewer*), then click *Done*.
+                - Click on the newly created service account email.
+                - Click the **KEYS** tab at the top → **ADD KEY** → **Create new key** → select **JSON** → click **Create**.
+                - A `.json` file will automatically download to your computer!
+
+                ##### Step 4: Upload the file
+                - Drag & drop that downloaded `.json` file into the box below.
+                - You are now ready to run Step 2!
                 """
             )
 
@@ -764,7 +767,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Container placed ABOVE the inputs so Field ID, area metrics, and polygon preview appear on top
+# Container placed at the beginning of Step 1 so Field ID input appears at the top
+step1_fid_container = st.container()
+
+# Container placed ABOVE boundary source so area metrics and polygon preview appear on top
 step1_preview_container = st.container()
 
 lib_boundaries = get_library_boundary_files()
@@ -863,11 +869,21 @@ if geom_changed or "field_id_custom" not in st.session_state:
     st.session_state["field_id_custom"] = inferred_default_fid
     st.session_state["field_id_input_widget"] = inferred_default_fid
 
-field_id_input = st.text_input(
-    "Field ID / name:",
-    key="field_id_input_widget",
-    help="Identifier for this field boundary (used in filenames, reports, and directory paths).",
-).strip().upper() or inferred_default_fid
+with step1_fid_container:
+    col_fid, col_fid_info = st.columns([1, 2])
+    with col_fid:
+        field_id_input = st.text_input(
+            "Field ID / name:",
+            key="field_id_input_widget",
+            help="Identifier for this field boundary (used in filenames, reports, and directory paths).",
+        ).strip().upper() or inferred_default_fid
+    with col_fid_info:
+        st.markdown(
+            f"<div style='padding-top: 1.85rem; font-size: 0.88rem; color: #475569;'>"
+            f"Active field identifier: <b><code>{field_id_input}</code></b> &bull; Used in filenames, reports, and directory paths."
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
 st.session_state["field_id_custom"] = field_id_input
 
@@ -913,13 +929,28 @@ if pinfo is not None:
 
     with step1_preview_container:
         st.markdown('<div class="md-output-title">📍 Loaded field boundary summary</div>', unsafe_allow_html=True)
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Field ID", pinfo["field_id"])
-        m2.metric("Field area (ha)", f"{pinfo['area_ha']:.2f} ha")
-        m3.metric("Field area (acres)", f"{pinfo['area_acres']:.2f} ac")
+        has_coord = "centroid_lat" in pinfo and "centroid_lon" in pinfo and pinfo["centroid_lat"] is not None
+        if has_coord:
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Field ID", pinfo["field_id"])
+            m2.metric("Field area (ha)", f"{pinfo['area_ha']:.2f} ha")
+            m3.metric("Field area (acres)", f"{pinfo['area_acres']:.2f} ac")
+            lat_dir = "N" if pinfo["centroid_lat"] >= 0 else "S"
+            lon_dir = "E" if pinfo["centroid_lon"] >= 0 else "W"
+            m4.metric("Coordinates", f"{abs(pinfo['centroid_lat']):.4f}°{lat_dir}, {abs(pinfo['centroid_lon']):.4f}°{lon_dir}")
+        else:
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Field ID", pinfo["field_id"])
+            m2.metric("Field area (ha)", f"{pinfo['area_ha']:.2f} ha")
+            m3.metric("Field area (acres)", f"{pinfo['area_acres']:.2f} ac")
 
         if Path(pinfo["preview_png_path"]).exists():
-            render_crisp_figure(pinfo["preview_png_path"], use_svg_if_available=True, max_height_px=420)
+            render_crisp_figure(
+                pinfo["preview_png_path"],
+                use_svg_if_available=True,
+                max_height_px=620,
+                full_width=True,
+            )
 
 # ==============================================================================
 # STEP 2: SELECT SOYBEAN SEASON & SENTINEL-2 NDVI SEASON PROGRESS
@@ -986,32 +1017,32 @@ with st.expander("❓ Beginner Guide: How to get a Google Earth Engine account &
         ---
 
         #### If you want to use Step 2 (Sentinel-2 Continuous Trajectory):
-        
-        1. **Register for Free Earth Engine Access**:
-           - Open [code.earthengine.google.com](https://code.earthengine.google.com) in your browser and log in with your Google account.
-           - Choose **Unpaid / Academic / Research** use.
-           - Follow the prompt to create a Google Cloud Project (e.g., named `ee-yourname`).
 
-        2. **Find your Project ID**:
-           - In the Earth Engine code editor, look at the top-right corner.
-           - Your project ID will look like `ee-yourname` or `rcr-scout-423101`.
-           - Enter this into the **Google Earth Engine project ID** field in the left sidebar.
+        ##### Step 1: Register for Free Earth Engine Access
+        - Open [code.earthengine.google.com](https://code.earthengine.google.com) in your browser and log in with your Google account.
+        - Choose **Unpaid / Academic / Research** use.
+        - Follow the prompt to create a Google Cloud Project (e.g., named `ee-yourname`).
 
-        3. **Generate your free Service Account Key (`.json`)**:
-           Because this web platform runs in the cloud, Google uses a private Service Account key file to authenticate your requests:
-           - Open the [Google Cloud Service Accounts Console](https://console.cloud.google.com/iam-admin/serviceaccounts).
-           - Confirm your Earth Engine project is selected in the top dropdown.
-           - Click **+ CREATE SERVICE ACCOUNT** at the top.
-           - Type any name (e.g. `rcr-web`) and click **Create and Continue**.
-           - Under **Select a role**, choose **Earth Engine** &rarr; **Earth Engine User** (or *Resource Viewer*), then click **Done**.
-           - Click on the newly created service account email.
-           - Click the **KEYS** tab at the top &rarr; **ADD KEY** &rarr; **Create new key** &rarr; select **JSON** &rarr; click **Create**.
-           - A `.json` file will automatically download to your computer!
+        ##### Step 2: Find your Project ID
+        - In the Earth Engine code editor, look at the top-right corner.
+        - Your project ID will look like `ee-yourname` or `rcr-scout-423101`.
+        - Enter this into the **Google Earth Engine project ID** field in the left sidebar.
 
-        4. **Upload the file to the platform**:
-           - Open the left sidebar &rarr; expand **🔑 Earth Engine Access & Credentials**.
-           - Drag & drop the downloaded `.json` file into the box.
-           - That's it! Now click **🚀 Run Sentinel-2 analysis** below.
+        ##### Step 3: Generate your free Service Account Key (`.json`)
+        Because this web platform runs in the cloud, Google uses a private Service Account key file to authenticate your requests:
+        - Open the [Google Cloud Service Accounts Console](https://console.cloud.google.com/iam-admin/serviceaccounts).
+        - Confirm your Earth Engine project is selected in the top dropdown.
+        - Click **+ CREATE SERVICE ACCOUNT** at the top.
+        - Type any name (e.g. `rcr-web`) and click **Create and Continue**.
+        - Under **Select a role**, choose **Earth Engine** → **Earth Engine User** (or *Resource Viewer*), then click **Done**.
+        - Click on the newly created service account email.
+        - Click the **KEYS** tab at the top → **ADD KEY** → **Create new key** → select **JSON** → click **Create**.
+        - A `.json` file will automatically download to your computer!
+
+        ##### Step 4: Upload the file to the platform
+        - Open the left sidebar → expand **🔑 Earth Engine Access & Credentials**.
+        - Drag & drop the downloaded `.json` file into the box.
+        - That's it! Now click **🚀 Run Sentinel-2 analysis** below.
         """
     )
 
@@ -1166,10 +1197,32 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_manual, tab_api = st.tabs([
+STEP3_TAB_OPTIONS = [
     "📂 Option A: Upload downloaded PlanetScope GeoTIFFs (.tif)",
     "🔑 Option B: Connect personal Planet API key (auto-search & clipped download)",
-])
+]
+
+# Ensure active tab state is preserved across window defocus, tab switching, and reruns
+url_params = st.query_params
+if "step3_imagery_tab" not in st.session_state:
+    if url_params.get("option", "").lower() in ("b", "api", "planet") or st.session_state.get("planet_search_res") is not None or st.session_state.get("last_order_id"):
+        st.session_state["step3_imagery_tab"] = STEP3_TAB_OPTIONS[1]
+    else:
+        st.session_state["step3_imagery_tab"] = STEP3_TAB_OPTIONS[0]
+
+tab_manual, tab_api = st.tabs(
+    STEP3_TAB_OPTIONS,
+    key="step3_imagery_tab",
+    on_change="rerun",
+)
+
+# Synchronize clean URL query parameter for reload and focus resilience
+if st.session_state.get("step3_imagery_tab") == STEP3_TAB_OPTIONS[1]:
+    if st.query_params.get("option") != "b":
+        st.query_params["option"] = "b"
+elif "option" in st.query_params:
+    del st.query_params["option"]
+
 
 active_fid = pinfo["field_id"] if pinfo else field_id_input
 selected_early_tif: Optional[Path] = None
@@ -1244,9 +1297,12 @@ with tab_api:
             if default_pl_key:
                 st.session_state["planet_api_key"] = default_pl_key
 
+        if "planet_api_key_input" not in st.session_state or (default_pl_key and not st.session_state.get("planet_api_key_input")):
+            st.session_state["planet_api_key_input"] = default_pl_key
+
         planet_api_key_raw = st.text_input(
             "Personal Planet API key:",
-            value=st.session_state.get("planet_api_key", ""),
+            key="planet_api_key_input",
             type="password",
             placeholder="Paste your PL_API_KEY here...",
             help="Found in your Planet account settings -> API key. Never stored on disk.",
@@ -1259,6 +1315,7 @@ with tab_api:
             "Season start date (YYYY-MM-DD):",
             value=f"{season_input}-05-01",
             placeholder="YYYY-MM-DD",
+            key=f"search_start_{season_input}",
             help="Start date for the Planet catalog search window in YYYY-MM-DD format (e.g. 2025-05-01).",
         ).strip()
     with api_c3:
@@ -1266,6 +1323,7 @@ with tab_api:
             "Season end date (YYYY-MM-DD):",
             value=f"{season_input}-10-31",
             placeholder="YYYY-MM-DD",
+            key=f"search_end_{season_input}",
             help="End date for the Planet catalog search window in YYYY-MM-DD format (e.g. 2025-10-31).",
         ).strip()
 
@@ -1276,7 +1334,7 @@ with tab_api:
 
     cfg_c1, cfg_c2 = st.columns([1.1, 1.1])
     with cfg_c1:
-        max_cloud_pct = st.slider("Max cloud cover (%)", min_value=0, max_value=50, value=20, step=5)
+        max_cloud_pct = st.slider("Max cloud cover (%)", min_value=0, max_value=50, value=20, step=5, key="max_cloud_pct_slider")
     with cfg_c2:
         max_order_wait_mins = st.slider(
             "Max order clipping wait time (minutes):",
@@ -1284,6 +1342,7 @@ with tab_api:
             max_value=45,
             value=30,
             step=5,
+            key="max_order_wait_mins_slider",
             help="Planet clipping typically takes 10–25 minutes. If it exceeds this time, you can resume downloading using the Order ID tool below.",
         )
 
@@ -1456,12 +1515,16 @@ with tab_api:
         elif inferred_default_fid and (SAT_BASE_DIR / inferred_default_fid / str(season_input) / "last_planet_order_id.txt").exists():
             saved_oid = (SAT_BASE_DIR / inferred_default_fid / str(season_input) / "last_planet_order_id.txt").read_text(encoding="utf-8").strip()
         default_oid = st.session_state.get("last_order_id", saved_oid)
+        if "planet_order_id_input" not in st.session_state or (default_oid and not st.session_state.get("planet_order_id_input")):
+            st.session_state["planet_order_id_input"] = default_oid
         input_order_id = st.text_input(
             "Planet Order ID:",
-            value=default_oid,
+            key="planet_order_id_input",
             placeholder="e.g. 191282b5-a60b-49b3-ac9d-d46fd130854e",
             help="Paste the 36-character UUID from your Planet Orders confirmation or error message.",
         ).strip().strip("'").strip('"').strip()
+        if input_order_id:
+            st.session_state["last_order_id"] = input_order_id
     with res_c2:
         st.write("")
         st.write("")
@@ -1551,73 +1614,74 @@ with tab_api:
                 except Exception as e:
                     _render_planet_error(e, input_order_id)
 
-    # ------------------------------------------------------------------------------
-    # DISCOVER ALL AVAILABLE PLANETSCOPE RASTERS (DOWNLOADED, UPLOADED, OR LOCAL)
-    # ------------------------------------------------------------------------------
-    def _format_raster_display(p: Path) -> str:
-        d_str = parse_date_from_filename(p.name)
-        iso = format_yyyymmdd_iso(d_str) if d_str else "Unknown date"
-        return f"📅 {iso} · {p.name}"
+# ------------------------------------------------------------------------------
+# DISCOVER ALL AVAILABLE PLANETSCOPE RASTERS (DOWNLOADED, UPLOADED, OR LOCAL)
+# ------------------------------------------------------------------------------
+def _format_raster_display(p: Path) -> str:
+    d_str = parse_date_from_filename(p.name)
+    iso = format_yyyymmdd_iso(d_str) if d_str else "Unknown date"
+    return f"📅 {iso} · {p.name}"
 
-    discovered_rasters_map: Dict[str, Path] = {}
+discovered_rasters_map: Dict[str, Path] = {}
 
-    # 1. Any rasters from API downloads or manual uploads in session
-    for p_str in st.session_state.get("api_downloaded_files", []) + st.session_state.get("manual_uploaded_files", []):
-        p = Path(p_str)
-        if p.exists() and p.name not in discovered_rasters_map:
-            discovered_rasters_map[p.name] = p
+# 1. Any rasters from API downloads or manual uploads in session
+for p_str in st.session_state.get("api_downloaded_files", []) + st.session_state.get("manual_uploaded_files", []):
+    p = Path(p_str)
+    if p.exists() and p.name not in discovered_rasters_map:
+        discovered_rasters_map[p.name] = p
 
-    # 2. Any rasters in routine_inspection/raw_satellite/
-    candidate_dirs = [
-        SAT_BASE_DIR / active_fid / str(season_input),
-        SAT_BASE_DIR / active_fid,
-    ]
-    if inferred_default_fid and inferred_default_fid != active_fid:
-        candidate_dirs.extend([
-            SAT_BASE_DIR / inferred_default_fid / str(season_input),
-            SAT_BASE_DIR / inferred_default_fid,
-        ])
-    if active_fid in ("FIELD_1", "PC3") or inferred_default_fid in ("FIELD_1", "PC3"):
-        candidate_dirs.extend([
-            SAT_BASE_DIR / "FIELD_1" / str(season_input),
-            SAT_BASE_DIR / "FIELD_1",
-            SAT_BASE_DIR / "FIELD_1" / "2025",
-            SAT_BASE_DIR / "FIELD_1" / "2024",
-            SAT_BASE_DIR / "PC3" / str(season_input),
-            SAT_BASE_DIR / "PC3",
-        ])
-    for cdir in candidate_dirs:
-        if cdir.exists():
-            for f in cdir.rglob("*.tif*"):
-                if f.is_file() and "udm" not in f.name.lower() and f.name not in discovered_rasters_map:
-                    if "sr" in f.name.lower() or "analytic" in f.name.lower() or "clip" in f.name.lower():
-                        discovered_rasters_map[f.name] = f
+# 2. Any rasters in routine_inspection/raw_satellite/
+candidate_dirs = [
+    SAT_BASE_DIR / active_fid / str(season_input),
+    SAT_BASE_DIR / active_fid,
+]
+if inferred_default_fid and inferred_default_fid != active_fid:
+    candidate_dirs.extend([
+        SAT_BASE_DIR / inferred_default_fid / str(season_input),
+        SAT_BASE_DIR / inferred_default_fid,
+    ])
+if active_fid in ("FIELD_1", "PC3") or inferred_default_fid in ("FIELD_1", "PC3"):
+    candidate_dirs.extend([
+        SAT_BASE_DIR / "FIELD_1" / str(season_input),
+        SAT_BASE_DIR / "FIELD_1",
+        SAT_BASE_DIR / "FIELD_1" / "2025",
+        SAT_BASE_DIR / "FIELD_1" / "2024",
+        SAT_BASE_DIR / "PC3" / str(season_input),
+        SAT_BASE_DIR / "PC3",
+    ])
+for cdir in candidate_dirs:
+    if cdir.exists():
+        for f in cdir.rglob("*.tif*"):
+            if f.is_file() and "udm" not in f.name.lower() and f.name not in discovered_rasters_map:
+                if "sr" in f.name.lower() or "analytic" in f.name.lower() or "clip" in f.name.lower():
+                    discovered_rasters_map[f.name] = f
 
-    # Sort rasters chronologically
-    all_available_rasters = sorted(
-        list(discovered_rasters_map.values()),
-        key=lambda p: (parse_date_from_filename(p.name) or "99999999", p.name),
-    )
+# Sort rasters chronologically
+all_available_rasters = sorted(
+    list(discovered_rasters_map.values()),
+    key=lambda p: (parse_date_from_filename(p.name) or "99999999", p.name),
+)
 
-    # Visual summary of staged imagery in Step 3
-    if all_available_rasters:
-        st.markdown('<div class="md-output-title">📋 Staged PlanetScope imagery for analysis</div>', unsafe_allow_html=True)
-        summary_chips = [f"`{format_yyyymmdd_iso(parse_date_from_filename(p.name) or '')}`" for p in all_available_rasters]
-        col_staged_info, col_clear = st.columns([3.5, 1.2])
-        with col_staged_info:
-            st.info(f"🛰️ **{len(all_available_rasters)} PlanetScope 8-band GeoTIFF raster(s) ready:** {', '.join(summary_chips)}")
-        with col_clear:
-            if st.button("🗑️ Clear staged imagery", help="Removes staged rasters for this field so you can download or upload fresh imagery."):
-                st.session_state["api_downloaded_files"] = []
-                st.session_state["manual_uploaded_files"] = []
-                target_fdir = SAT_BASE_DIR / active_fid / str(season_input)
-                if target_fdir.exists():
-                    shutil.rmtree(target_fdir, ignore_errors=True)
-                if inferred_default_fid and inferred_default_fid != active_fid:
-                    alt_fdir = SAT_BASE_DIR / inferred_default_fid / str(season_input)
-                    if alt_fdir.exists() and inferred_default_fid not in ("FIELD_1", "PC3"):
-                        shutil.rmtree(alt_fdir, ignore_errors=True)
-                st.rerun()
+# Visual summary of staged imagery in Step 3
+if all_available_rasters:
+    st.markdown('<div class="md-output-title">📋 Staged PlanetScope imagery for analysis</div>', unsafe_allow_html=True)
+    summary_chips = [f"`{format_yyyymmdd_iso(parse_date_from_filename(p.name) or '')}`" for p in all_available_rasters]
+    col_staged_info, col_clear = st.columns([3.5, 1.2])
+    with col_staged_info:
+        st.info(f"🛰️ **{len(all_available_rasters)} PlanetScope 8-band GeoTIFF raster(s) ready:** {', '.join(summary_chips)}")
+    with col_clear:
+        if st.button("🗑️ Clear staged imagery", help="Removes staged rasters for this field so you can download or upload fresh imagery."):
+            st.session_state["api_downloaded_files"] = []
+            st.session_state["manual_uploaded_files"] = []
+            target_fdir = SAT_BASE_DIR / active_fid / str(season_input)
+            if target_fdir.exists():
+                shutil.rmtree(target_fdir, ignore_errors=True)
+            if inferred_default_fid and inferred_default_fid != active_fid:
+                alt_fdir = SAT_BASE_DIR / inferred_default_fid / str(season_input)
+                if alt_fdir.exists() and inferred_default_fid not in ("FIELD_1", "PC3"):
+                    shutil.rmtree(alt_fdir, ignore_errors=True)
+            st.rerun()
+
 
 # ==============================================================================
 # STEP 4: CHOOSE CLASSIFICATION DATES & RUN RCR CLASSIFICATION

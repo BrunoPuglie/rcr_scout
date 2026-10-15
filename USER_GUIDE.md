@@ -77,13 +77,14 @@ Google Earth Engine requires each user to have their own Google Cloud Project ID
 ```
 
 ### Step 1: Upload Field Boundary Polygon
-1. In **Step 1**, drag and drop your field boundary file:
+1. In **Step 1**, verify or enter your **Field ID** (e.g., `FIELD_1` or your custom field name).
+2. Choose your field boundary source and upload your vector boundary file:
    - Supported vector formats:
      - **Shapefile** (either a `.zip` containing `.shp, .shx, .dbf, .prj`, or upload the individual files together)
      - **GeoPackage** (`.gpkg`)
      - **GeoJSON** (`.geojson` / `.json`)
      - **KML** (`.kml`)
-2. Enter or edit your **Field ID** (e.g., `FIELD_1`).
+   - Or select from the pre-loaded research field library.
 3. The platform immediately calculates the field's area in **hectares** and **acres** and renders a high-resolution boundary preview.
 
 ---

@@ -149,12 +149,17 @@ def main():
             _save_fig_agg(fig, preview_png, dpi=500)
 
             avail_seasons = find_available_seasons_for_field(resolved_id)
+            centroid = gdf_wgs84.geometry.iloc[0].centroid
+            centroid_lat = round(float(centroid.y), 4)
+            centroid_lon = round(float(centroid.x), 4)
 
             resp = {
                 "status": "ok",
                 "field_id": resolved_id,
                 "area_ha": area_ha,
                 "area_acres": area_ac,
+                "centroid_lat": centroid_lat,
+                "centroid_lon": centroid_lon,
                 "boundary_geojson_path": str(geojson_path),
                 "preview_png_path": str(preview_png),
                 "available_seasons": avail_seasons,

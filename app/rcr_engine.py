@@ -275,22 +275,49 @@ def _fetch_google_satellite_basemap_in_memory(
     dst_crs,
     dst_bounds: Tuple[float, float, float, float],
     pad_frac: float = 0.10,
+    target_aspect: Optional[float] = None,
 ) -> Optional[Tuple[np.ndarray, List[float]]]:
     """
     Fetches Google Satellite tiles (`mt1.google.com/vt/lyrs=s`) purely in RAM (`io.BytesIO`,
     zero files saved to disk) for `dst_bounds = (xmin, ymin, xmax, ymax)` in `dst_crs`,
+    optionally expanding to a `target_aspect` (width/height ratio such as 16/9) for panoramic view,
     reprojects the mosaic in memory to `dst_crs`, and returns `(rgb_hwc_uint8, [xmin, xmax, ymin, ymax])`.
     """
     import math
+    import concurrent.futures
     from PIL import Image
     from rasterio.transform import from_origin, from_bounds
     from rasterio.warp import transform_bounds
 
     try:
         xmin, ymin, xmax, ymax = dst_bounds
-        pad_x = max(10.0, (xmax - xmin) * pad_frac)
-        pad_y = max(10.0, (ymax - ymin) * pad_frac)
-        b_xmin, b_ymin, b_xmax, b_ymax = xmin - pad_x, ymin - pad_y, xmax + pad_x, ymax + pad_y
+        w_field = max(10.0, float(xmax - xmin))
+        h_field = max(10.0, float(ymax - ymin))
+
+        pad_x = max(10.0, w_field * pad_frac)
+        pad_y = max(10.0, h_field * pad_frac)
+        b_xmin = xmin - pad_x
+        b_xmax = xmax + pad_x
+        b_ymin = ymin - pad_y
+        b_ymax = ymax + pad_y
+
+        # If a target aspect ratio is specified, symmetrically expand bounds so the view fills the wide frame
+        if target_aspect is not None and target_aspect > 0:
+            cur_w = b_xmax - b_xmin
+            cur_h = b_ymax - b_ymin
+            cur_aspect = cur_w / max(1e-6, cur_h)
+            if cur_aspect < target_aspect:
+                # Field is squarer/narrower than target aspect: expand horizontally
+                desired_w = cur_h * target_aspect
+                diff_x = (desired_w - cur_w) / 2.0
+                b_xmin -= diff_x
+                b_xmax += diff_x
+            elif cur_aspect > target_aspect:
+                # Field is wider than target aspect: expand vertically
+                desired_h = cur_w / target_aspect
+                diff_y = (desired_h - cur_h) / 2.0
+                b_ymin -= diff_y
+                b_ymax += diff_y
 
         lon_min, lat_min, lon_max, lat_max = transform_bounds(
             dst_crs, "EPSG:4326", b_xmin, b_ymin, b_xmax, b_ymax, densify_pts=21
@@ -308,7 +335,7 @@ def _fetch_google_satellite_basemap_in_memory(
             x0, y0 = _deg2tile(lat_max, lon_min, z_cand)
             x1, y1 = _deg2tile(lat_min, lon_max, z_cand)
             n_tiles = (abs(x1 - x0) + 1) * (abs(y1 - y0) + 1)
-            if n_tiles <= 16:
+            if n_tiles <= 28:
                 chosen_z = z_cand
                 break
 
@@ -324,17 +351,33 @@ def _fetch_google_satellite_basemap_in_memory(
         mosaic = np.zeros((3, n_rows_t * 256, n_cols_t * 256), dtype=np.uint8)
 
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        with requests.Session() as sess:
-            for ty in range(y_min, y_max + 1):
-                for tx in range(x_min, x_max + 1):
-                    url = f"https://mt1.google.com/vt/lyrs=s&x={tx}&y={ty}&z={chosen_z}"
-                    r = sess.get(url, headers=headers, timeout=5)
-                    if r.status_code == 200:
-                        img = Image.open(io.BytesIO(r.content)).convert("RGB")
-                        arr = np.asarray(img, dtype=np.uint8)
-                        r0 = (ty - y_min) * 256
-                        c0 = (tx - x_min) * 256
-                        mosaic[:, r0:r0 + 256, c0:c0 + 256] = np.transpose(arr, (2, 0, 1))
+        tile_coords = [
+            (tx, ty)
+            for ty in range(y_min, y_max + 1)
+            for tx in range(x_min, x_max + 1)
+        ]
+
+        def _fetch_one_tile(coord):
+            tx, ty = coord
+            url = f"https://mt1.google.com/vt/lyrs=s&x={tx}&y={ty}&z={chosen_z}"
+            try:
+                r = requests.get(url, headers=headers, timeout=5)
+                if r.status_code == 200:
+                    img = Image.open(io.BytesIO(r.content)).convert("RGB")
+                    return tx, ty, np.asarray(img, dtype=np.uint8)
+            except Exception:
+                pass
+            return tx, ty, None
+
+        # Fetch tiles concurrently across threads for rapid mosaic generation
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(_fetch_one_tile, tile_coords))
+
+        for tx, ty, arr in results:
+            if arr is not None:
+                r0 = (ty - y_min) * 256
+                c0 = (tx - x_min) * 256
+                mosaic[:, r0 : r0 + 256, c0 : c0 + 256] = np.transpose(arr, (2, 0, 1))
 
         origin_shift = 20037508.342789244
         res_3857 = (2.0 * origin_shift) / (256.0 * (2.0 ** chosen_z))
@@ -343,8 +386,8 @@ def _fetch_google_satellite_basemap_in_memory(
         src_transform = from_origin(west_3857, north_3857, res_3857, res_3857)
 
         aspect = (b_ymax - b_ymin) / max(1e-6, (b_xmax - b_xmin))
-        dst_w = 720
-        dst_h = max(240, min(1200, int(round(dst_w * aspect))))
+        dst_w = 1440
+        dst_h = max(240, min(1440, int(round(dst_w * aspect))))
         dst_transform = from_bounds(b_xmin, b_ymin, b_xmax, b_ymax, dst_w, dst_h)
 
         warped = np.zeros((3, dst_h, dst_w), dtype=np.uint8)
@@ -366,48 +409,59 @@ def _fetch_google_satellite_basemap_in_memory(
 
 
 def plot_boundary_preview(poly_gdf: gpd.GeoDataFrame, field_id: str) -> Figure:
-    """High-resolution 500-DPI 2D boundary preview plot overlaid on in-memory Google Satellite imagery."""
-    fig = Figure(figsize=(8.0, 3.8), dpi=500, facecolor="#FFFFFF")
+    """High-resolution panoramic 16:9 boundary preview plot overlaid on in-memory Google Satellite imagery."""
+    # 16:9 widescreen aspect ratio (1.778)
+    target_aspect = 16.0 / 9.0
+    fig_w = 11.0
+    fig_h = round(fig_w / target_aspect, 3)  # ~6.188 inches
+    fig = Figure(figsize=(fig_w, fig_h), dpi=300, facecolor="#FFFFFF")
     ax = fig.subplots()
-    ax.set_facecolor("#F8FAFC")
+    ax.set_facecolor("#13294B")
 
-    gdf_utm = poly_gdf.to_crs("EPSG:32615")
+    try:
+        utm_crs = poly_gdf.estimate_utm_crs() or "EPSG:32615"
+    except Exception:
+        utm_crs = "EPSG:32615"
+    gdf_utm = poly_gdf.to_crs(utm_crs)
     geom = gdf_utm.geometry.iloc[0]
     xmin, ymin, xmax, ymax = gdf_utm.total_bounds
 
-    sat_res = _fetch_google_satellite_basemap_in_memory("EPSG:32615", (xmin, ymin, xmax, ymax), pad_frac=0.14)
+    sat_res = _fetch_google_satellite_basemap_in_memory(
+        utm_crs, (xmin, ymin, xmax, ymax), pad_frac=0.15, target_aspect=target_aspect
+    )
     if sat_res is not None:
         sat_rgb, sat_extent = sat_res
         ax.imshow(sat_rgb, extent=sat_extent, origin="upper", interpolation="bilinear", zorder=1)
-
-    polys = [geom] if geom.geom_type == "Polygon" else list(getattr(geom, "geoms", [geom]))
-    for p in polys:
-        if hasattr(p, "exterior") and p.exterior is not None:
-            x, y = p.exterior.xy
-            ax.fill(x, y, facecolor=ILLINI_ORANGE, edgecolor="none", alpha=0.18, zorder=2)
-            ax.plot(x, y, color="#FFFFFF", linewidth=3.0, alpha=0.9, zorder=3)
-            ax.plot(x, y, color=ILLINI_ORANGE, linewidth=1.8, zorder=4)
-
-    if sat_res is not None:
         ax.set_xlim(sat_extent[0], sat_extent[1])
         ax.set_ylim(sat_extent[2], sat_extent[3])
     else:
         ax.set_aspect("equal", adjustable="datalim")
 
+    polys = [geom] if geom.geom_type == "Polygon" else list(getattr(geom, "geoms", [geom]))
+    for p in polys:
+        if hasattr(p, "exterior") and p.exterior is not None:
+            x, y = p.exterior.xy
+            # High-visibility filled polygon with Illini Orange overlay
+            ax.fill(x, y, facecolor=ILLINI_ORANGE, edgecolor="none", alpha=0.20, zorder=2)
+            # High-contrast crisp white halo boundary
+            ax.plot(x, y, color="#FFFFFF", linewidth=3.6, alpha=0.95, zorder=3)
+            # Illini orange primary boundary stroke
+            ax.plot(x, y, color=ILLINI_ORANGE, linewidth=2.0, zorder=4)
+
     ax.set_title(
         f"Field boundary · {field_id}",
-        fontsize=9.5,
+        fontsize=11.5,
         fontweight="600",
         color=ILLINI_BLUE,
-        pad=7,
+        pad=9,
     )
     ax.set_xticks([])
     ax.set_yticks([])
     for spine in ax.spines.values():
         spine.set_visible(True)
         spine.set_edgecolor("#DCE2EC")
-        spine.set_linewidth(1.1)
-    fig.tight_layout()
+        spine.set_linewidth(1.2)
+    fig.tight_layout(pad=0.25)
     return fig
 
 
