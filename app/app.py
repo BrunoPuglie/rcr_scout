@@ -784,17 +784,24 @@ step1_preview_container = st.container()
 
 lib_boundaries = get_library_boundary_files()
 
-boundary_options = ["📤 Upload custom boundary files (.shp, .zip, .geojson, .gpkg, .kml)"]
+boundary_options = ["📤 Upload custom boundary files"]
 if lib_boundaries:
     boundary_options.append(f"📁 Select from Field Library ({len(lib_boundaries)} pre-loaded research fields)")
 
-boundary_mode = st.radio(
-    "Field boundary source:",
-    options=boundary_options,
-    index=0,
-    horizontal=True,
-    key="boundary_source_mode",
-)
+# Safety check for active session state if radio options changed
+if st.session_state.get("boundary_source_mode") not in boundary_options:
+    st.session_state["boundary_source_mode"] = boundary_options[0]
+
+if lib_boundaries:
+    boundary_mode = st.radio(
+        "Field boundary source:",
+        options=boundary_options,
+        index=0,
+        horizontal=True,
+        key="boundary_source_mode",
+    )
+else:
+    boundary_mode = boundary_options[0]
 
 target_vector_path: Optional[Path] = None
 inferred_default_fid = "FIELD_1"
@@ -819,9 +826,10 @@ if boundary_mode.startswith("📁") and lib_boundaries:
         geom_sig = f"lib:{selected_lib_path.name}"
 else:
     uploaded_polys = st.file_uploader(
-        "Upload your field boundary polygon (.shp, .gpkg, .geojson, .kml, or .zip):",
+        "Upload custom boundary files",
         type=["gpkg", "geojson", "json", "kml", "shp", "shx", "dbf", "prj", "cpg", "zip"],
         accept_multiple_files=True,
+        label_visibility="collapsed" if lib_boundaries else "visible",
         help="Upload a .zip containing the shapefile files, or individual .shp + .shx + .dbf + .prj files.",
     )
     if uploaded_polys:
