@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
+from PIL import Image
 import streamlit as st
 
 # ==============================================================================
@@ -280,9 +281,12 @@ def render_crisp_figure(
 # 2. PAGE CONFIGURATION & GOOGLE MATERIAL DESIGN + UIUC THEME
 # ==============================================================================
 
+FAVICON_PATH = APP_DIR / "assets" / "app_icon.png"
+fav_icon = Image.open(FAVICON_PATH) if FAVICON_PATH.exists() else "🛰️"
+
 st.set_page_config(
     page_title="Red crown rot scouting",
-    page_icon="🛰️",
+    page_icon=fav_icon,
     layout="wide",
     initial_sidebar_state="expanded",
 )
