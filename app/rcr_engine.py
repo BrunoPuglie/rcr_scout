@@ -73,7 +73,7 @@ from rasterio.mask import mask
 from rasterio.warp import Resampling, reproject
 import requests
 import shapely
-from shapely.geometry import box
+from shapely.geometry import box, shape
 from shapely.ops import unary_union
 
 # ==============================================================================
@@ -1108,7 +1108,21 @@ def search_planet_catalog_for_window(
     any combination of dates to download.
     """
     clean_key = _clean_planet_key(api_key)
-    poly_geojson = poly_gdf.to_crs("EPSG:4326").geometry.iloc[0].__geo_interface__
+    poly_gdf_4326 = poly_gdf.to_crs("EPSG:4326")
+    poly_geojson = poly_gdf_4326.geometry.iloc[0].__geo_interface__
+    field_geom_4326 = unary_union(poly_gdf_4326.geometry.values)
+    if not field_geom_4326.is_valid:
+        field_geom_4326 = shapely.make_valid(field_geom_4326)
+
+    try:
+        utm_crs = poly_gdf.estimate_utm_crs()
+        field_geom_utm = unary_union(poly_gdf.to_crs(utm_crs).geometry.values)
+        if not field_geom_utm.is_valid:
+            field_geom_utm = shapely.make_valid(field_geom_utm)
+        field_area_ref = float(field_geom_utm.area)
+    except Exception:
+        utm_crs = None
+        field_area_ref = float(field_geom_4326.area)
 
     # Resolve season year
     year = None
@@ -1182,11 +1196,42 @@ def search_planet_catalog_for_window(
             acq_dt = datetime.strptime(acq_str, "%Y-%m-%d")
         except ValueError:
             continue
+
+        geom_dict = f.get("geometry")
+        coverage_pct = 0.0
+        if geom_dict:
+            try:
+                scene_geom = shape(geom_dict)
+                if not scene_geom.is_valid:
+                    scene_geom = shapely.make_valid(scene_geom)
+
+                if scene_geom.contains(field_geom_4326):
+                    coverage_pct = 100.0
+                else:
+                    inter = field_geom_4326.intersection(scene_geom)
+                    if inter.is_empty:
+                        coverage_pct = 0.0
+                    else:
+                        if utm_crs is not None:
+                            inter_utm = gpd.GeoSeries([inter], crs="EPSG:4326").to_crs(utm_crs).iloc[0]
+                            inter_area = float(inter_utm.area)
+                        else:
+                            inter_area = float(inter.area)
+
+                        if field_area_ref > 0:
+                            ratio = (inter_area / field_area_ref) * 100.0
+                            coverage_pct = 100.0 if ratio >= 99.5 else round(max(0.0, ratio), 1)
+                        else:
+                            coverage_pct = 0.0
+            except Exception:
+                coverage_pct = 0.0
+
         scenes.append({
             "scene_id": f["id"],
             "date_str": acq_dt.strftime("%Y%m%d"),
             "date_iso": acq_str,
             "date_dt": acq_dt,
+            "coverage_pct": coverage_pct,
             "cloud_cover_pct": round(float(props.get("cloud_cover", 0.0)) * 100.0, 1),
             "sun_elevation": round(float(props.get("sun_elevation", 0.0)), 1),
             "instrument": props.get("instrument", "PSB.SD"),
@@ -1197,8 +1242,11 @@ def search_planet_catalog_for_window(
     if not scenes:
         raise ValueError(f"No valid PlanetScope scenes parsed in the window {start_iso} to {end_iso}.")
 
-    # Deduplicate by calendar day (keep scene with lowest cloud cover per day)
-    scenes_df = pd.DataFrame(scenes).sort_values(["date_str", "cloud_cover_pct"]).drop_duplicates("date_str", keep="first")
+    # Deduplicate by calendar day: prioritize full field coverage first, then lowest cloud cover
+    scenes_df = pd.DataFrame(scenes).sort_values(
+        ["date_str", "coverage_pct", "cloud_cover_pct"],
+        ascending=[True, False, True]
+    ).drop_duplicates("date_str", keep="first")
     scenes_df = scenes_df.sort_values("date_dt").reset_index(drop=True)
 
     peak_scene = None
@@ -1208,16 +1256,20 @@ def search_planet_catalog_for_window(
 
     # Highlight suggested captures based on the continuous Sentinel-2 NDVI trajectory
     if peak_date is not None and target_date is not None:
+        # Require full field coverage (>= 95%) for suggestions so partial captures are never auto-suggested
+        full_cov_mask = scenes_df["coverage_pct"] >= 95.0
+        cand_df = scenes_df[full_cov_mask].copy() if full_cov_mask.any() else scenes_df.copy()
+
         # 1. Early baseline mask (closest to peak canopy t_peak)
-        scenes_df["diff_peak"] = (scenes_df["date_dt"] - peak_date).abs()
-        idx_peak = scenes_df.sort_values(["diff_peak", "cloud_cover_pct"]).index[0]
+        cand_df["diff_peak"] = (cand_df["date_dt"] - peak_date).abs()
+        idx_peak = cand_df.sort_values(["diff_peak", "cloud_cover_pct"]).index[0]
         scenes_df.loc[idx_peak, "suggestion"] = "Suggested (early baseline, t_peak)"
         scenes_df.loc[idx_peak, "is_suggested"] = True
         peak_scene = scenes_df.loc[idx_peak].to_dict()
 
         # Remaining candidates for target dates
-        rem_mask = scenes_df.index != idx_peak
-        rem_df = scenes_df[rem_mask].copy()
+        rem_mask = cand_df.index != idx_peak
+        rem_df = cand_df[rem_mask].copy()
 
         if not rem_df.empty:
             # 2. Optimal target (closest to optimal scouting date t_0)
@@ -1230,7 +1282,7 @@ def search_planet_catalog_for_window(
 
             # 3. Pre-target (-5 days before t_0)
             b_target = before_date or (target_date - timedelta(days=5))
-            before_cands = scenes_df[rem_mask & (scenes_df["date_dt"] < t0_dt)].copy()
+            before_cands = rem_df[rem_df["date_dt"] < t0_dt].copy()
             if not before_cands.empty:
                 before_cands["diff_before"] = (before_cands["date_dt"] - b_target).abs()
                 idx_before = before_cands.sort_values(["diff_before", "cloud_cover_pct"]).index[0]
@@ -1240,7 +1292,7 @@ def search_planet_catalog_for_window(
 
             # 4. Post-target (+5 days after t_0)
             a_target = after_date or (target_date + timedelta(days=5))
-            after_cands = scenes_df[rem_mask & (scenes_df["date_dt"] > t0_dt)].copy()
+            after_cands = rem_df[rem_df["date_dt"] > t0_dt].copy()
             if not after_cands.empty:
                 after_cands["diff_after"] = (after_cands["date_dt"] - a_target).abs()
                 idx_after = after_cands.sort_values(["diff_after", "cloud_cover_pct"]).index[0]

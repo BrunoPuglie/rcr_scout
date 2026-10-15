@@ -1388,18 +1388,52 @@ with tab_api:
         all_scenes = sr.get("all_scenes", [])
         suggested_ids = sr.get("suggested_scene_ids", [])
 
+        st.markdown('<div class="md-output-title">🎯 Available PlanetScope 8-band scenes across season</div>', unsafe_allow_html=True)
+
+        cov_filt_c1, cov_filt_c2 = st.columns([1.6, 2.4])
+        with cov_filt_c1:
+            only_full_cov = st.checkbox(
+                "🛡️ Full field coverage only (≥98%)",
+                value=True,
+                key="planet_catalog_filter_full_cov",
+                help="When enabled, hides any captures that only partially overlap your field boundary."
+            )
+        with cov_filt_c2:
+            st.caption("💡 Partial scenes cover only a fraction of your field and result in incomplete RCR maps. Keep checked for optimal full-field results.")
+
+        # Filter scenes based on toggle
+        if only_full_cov:
+            filtered_scenes = [s for s in all_scenes if float(s.get("coverage_pct", 100.0)) >= 98.0]
+            if not filtered_scenes:
+                st.warning("⚠️ No captures with ≥98% coverage found in this date window. Showing all available passes instead.")
+                filtered_scenes = all_scenes
+        else:
+            filtered_scenes = all_scenes
+
         # Build table with an interactive Select column
         display_rows = []
         is_selected_initial = []
-        for s in all_scenes:
+        for s in filtered_scenes:
             is_suggested = s["scene_id"] in suggested_ids
             is_selected_initial.append(is_suggested)
+
+            cov_val = float(s.get("coverage_pct", 100.0))
+            if cov_val >= 99.0:
+                cov_badge = "🟢 100% (Full)"
+            elif cov_val >= 90.0:
+                cov_badge = f"🟡 {cov_val:.1f}% (High)"
+            elif cov_val >= 50.0:
+                cov_badge = f"🟠 {cov_val:.1f}% (Partial)"
+            else:
+                cov_badge = f"🔴 {cov_val:.1f}% (Low)"
+
             display_rows.append({
                 "Select": is_suggested,
                 "Acquisition date": s["date_iso"],
+                "Field coverage": cov_badge,
                 "Suggestion status": f"⭐ {s['suggestion']}" if s.get("suggestion") else "— Available pass",
-                "Planet scene ID": s["scene_id"],
                 "Cloud cover (%)": s["cloud_cover_pct"],
+                "Planet scene ID": s["scene_id"],
                 "Instrument": s["instrument"],
             })
 
@@ -1408,7 +1442,6 @@ with tab_api:
 
         catalog_df = pd.DataFrame(display_rows)
 
-        st.markdown('<div class="md-output-title">🎯 Available PlanetScope 8-band scenes across season</div>', unsafe_allow_html=True)
         st.info(
             "💡 **Direct catalog selection:** Check or uncheck scenes directly in the **Select** column of the table below to choose which captures to download. "
             "Suggested captures based on your Sentinel-2 NDVI plot are pre-checked."
@@ -1423,15 +1456,19 @@ with tab_api:
                     default=False,
                 ),
                 "Acquisition date": st.column_config.TextColumn("Acquisition date"),
+                "Field coverage": st.column_config.TextColumn(
+                    "Field coverage",
+                    help="Geometric percentage of your field boundary covered by this PlanetScope scene footprint.",
+                ),
                 "Suggestion status": st.column_config.TextColumn("Suggestion status"),
-                "Planet scene ID": st.column_config.TextColumn("Planet scene ID"),
                 "Cloud cover (%)": st.column_config.NumberColumn("Cloud cover (%)", format="%.1f%%"),
+                "Planet scene ID": st.column_config.TextColumn("Planet scene ID"),
                 "Instrument": st.column_config.TextColumn("Instrument"),
             },
-            disabled=["Acquisition date", "Suggestion status", "Planet scene ID", "Cloud cover (%)", "Instrument"],
+            disabled=["Acquisition date", "Field coverage", "Suggestion status", "Cloud cover (%)", "Planet scene ID", "Instrument"],
             hide_index=True,
             use_container_width=True,
-            key="planet_catalog_table_selector",
+            key=f"planet_catalog_table_selector_{only_full_cov}",
         )
 
         selected_rows = edited_catalog[edited_catalog["Select"] == True]
@@ -1441,6 +1478,19 @@ with tab_api:
         if chosen_scene_ids:
             dates_summary = ", ".join([f"`{d}`" for d in chosen_dates])
             st.markdown(f"**Selected capture(s) to order ({len(chosen_scene_ids)}):** {dates_summary}")
+
+            # Alert if any selected capture is partial
+            partial_selected = [
+                f"`{row['Acquisition date']}` ({row['Field coverage']})"
+                for _, row in selected_rows.iterrows()
+                if "Full" not in str(row.get("Field coverage", "")) and "100%" not in str(row.get("Field coverage", ""))
+            ]
+            if partial_selected:
+                st.warning(
+                    f"⚠️ **Partial Field Coverage Warning:** The following selected capture(s) do not cover 100% of your field boundary: "
+                    f"{', '.join(partial_selected)}. "
+                    "Downstream classification for these dates will produce a partial map covering only the captured portion of the field."
+                )
         else:
             st.warning("⚠️ No captures currently selected. Please check at least one scene in the table above.")
 
