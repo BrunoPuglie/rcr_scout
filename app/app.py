@@ -785,6 +785,7 @@ target_vector_path: Optional[Path] = None
 inferred_default_fid = "FIELD_1"
 selected_lib_path: Optional[Path] = None
 uploaded_polys = None
+geom_sig = ""
 
 if boundary_mode.startswith("📁") and lib_boundaries:
     selected_label = st.selectbox(
@@ -800,6 +801,7 @@ if boundary_mode.startswith("📁") and lib_boundaries:
             re.sub(r"^(boun[d]?|boundary|field)[_-]?", "", selected_lib_path.stem, flags=re.IGNORECASE).strip().upper()
             or "FIELD_1"
         )
+        geom_sig = f"lib:{selected_lib_path.name}"
 else:
     uploaded_polys = st.file_uploader(
         "Upload your field boundary polygon (.shp, .gpkg, .geojson, .kml, or .zip):",
@@ -813,54 +815,63 @@ else:
             uploaded_polys[0],
         )
         inferred_default_fid = (
-            re.sub(r"^(boun[d]?|boundary|field)[_-]?", "", Path(primary_up.name).stem, flags=re.IGNORECASE).upper()
+            re.sub(r"^(boun[d]?|boundary|field)[_-]?", "", Path(primary_up.name).stem, flags=re.IGNORECASE).strip().upper()
             or "FIELD_1"
         )
+        # Compute signature purely based on file names, sizes, and content hash (independent of field name)
+        sig_parts = []
+        for uf in sorted(uploaded_polys, key=lambda x: x.name):
+            raw_b = uf.getvalue()
+            sig_parts.append(f"{uf.name}:{len(raw_b)}:{hashlib.md5(raw_b[:64]).hexdigest()}")
+        geom_sig = f"upload:{hashlib.md5('|'.join(sig_parts).encode('utf-8')).hexdigest()}"
+
+        upload_dir = get_session_workdir() / "uploaded_boundary"
+
+        # If a new or changed set of files was uploaded, extract them into upload_dir
+        if geom_sig != st.session_state.get("poly_sig"):
+            if upload_dir.exists():
+                shutil.rmtree(upload_dir, ignore_errors=True)
+            upload_dir.mkdir(parents=True, exist_ok=True)
+
+            for uf in uploaded_polys:
+                raw_b = uf.getvalue()
+                dest = upload_dir / Path(uf.name).name
+                dest.write_bytes(raw_b)
+                if dest.suffix.lower() == ".zip":
+                    with zipfile.ZipFile(dest, "r") as zf:
+                        zf.extractall(upload_dir)
+
+        # Retain candidate discovery on every rerun so target_vector_path is never lost
+        if upload_dir.exists():
+            candidates = (
+                list(upload_dir.rglob("*.gpkg"))
+                + list(upload_dir.rglob("*.geojson"))
+                + list(upload_dir.rglob("*.json"))
+                + list(upload_dir.rglob("*.kml"))
+                + list(upload_dir.rglob("*.shp"))
+            )
+            if candidates:
+                target_vector_path = candidates[0]
+            else:
+                st.warning("Please include the `.shp`, `.gpkg`, `.geojson`, `.kml`, or `.zip` geometry file.")
+
+# Determine if the geometric boundary source has changed
+geom_changed = bool(geom_sig and geom_sig != st.session_state.get("poly_sig"))
+
+# Sync or preserve the user's custom Field ID
+if geom_changed or "field_id_custom" not in st.session_state:
+    st.session_state["field_id_custom"] = inferred_default_fid
+    st.session_state["field_id_input_widget"] = inferred_default_fid
 
 field_id_input = st.text_input(
     "Field ID / name:",
-    value=inferred_default_fid,
-    key=f"fid_input_{inferred_default_fid}",
+    key="field_id_input_widget",
     help="Identifier for this field boundary (used in filenames, reports, and directory paths).",
 ).strip().upper() or inferred_default_fid
 
-new_sig = None
-if boundary_mode.startswith("📁") and selected_lib_path:
-    new_sig = f"lib:{selected_lib_path.name}:{field_id_input}"
-elif uploaded_polys:
-    sig_parts = [field_id_input]
-    for uf in sorted(uploaded_polys, key=lambda x: x.name):
-        raw_b = uf.getvalue()
-        sig_parts.append(f"{uf.name}:{len(raw_b)}:{hashlib.md5(raw_b[:64]).hexdigest()}")
-    new_sig = f"upload:{hashlib.md5('|'.join(sig_parts).encode('utf-8')).hexdigest()}"
+st.session_state["field_id_custom"] = field_id_input
 
-    if new_sig != st.session_state["poly_sig"]:
-        upload_dir = get_session_workdir() / "uploaded_boundary"
-        if upload_dir.exists():
-            shutil.rmtree(upload_dir, ignore_errors=True)
-        upload_dir.mkdir(parents=True, exist_ok=True)
-
-        for uf in uploaded_polys:
-            raw_b = uf.getvalue()
-            dest = upload_dir / Path(uf.name).name
-            dest.write_bytes(raw_b)
-            if dest.suffix.lower() == ".zip":
-                with zipfile.ZipFile(dest, "r") as zf:
-                    zf.extractall(upload_dir)
-
-        candidates = (
-            list(upload_dir.rglob("*.gpkg"))
-            + list(upload_dir.rglob("*.geojson"))
-            + list(upload_dir.rglob("*.json"))
-            + list(upload_dir.rglob("*.kml"))
-            + list(upload_dir.rglob("*.shp"))
-        )
-        if candidates:
-            target_vector_path = candidates[0]
-        else:
-            st.warning("Please include the `.shp`, `.gpkg`, `.geojson`, `.kml`, or `.zip` geometry file.")
-
-if target_vector_path and new_sig and new_sig != st.session_state["poly_sig"]:
+if target_vector_path and geom_sig and geom_changed:
     with st.spinner("Reading field boundary polygon..."):
         try:
             res = run_worker({
@@ -869,14 +880,14 @@ if target_vector_path and new_sig and new_sig != st.session_state["poly_sig"]:
                 "field_id": field_id_input,
             })
             st.session_state["poly_info"] = res
-            st.session_state["poly_sig"] = new_sig
+            st.session_state["poly_sig"] = geom_sig
             st.session_state["pheno_res"] = None
             st.session_state["planet_search_res"] = None
             st.session_state["run_res"] = None
         except Exception as e:
             st.session_state["poly_info"] = None
             st.error(f"Could not read field boundary: {e}")
-elif not target_vector_path and st.session_state.get("poly_sig"):
+elif not geom_sig and st.session_state.get("poly_info") is not None:
     st.session_state["poly_info"] = None
     st.session_state["poly_sig"] = ""
     st.session_state["pheno_res"] = None
@@ -886,7 +897,20 @@ elif not target_vector_path and st.session_state.get("poly_sig"):
 # Render Field ID, area metrics, and polygon figure ABOVE the Step 1 inputs
 pinfo = st.session_state.get("poly_info")
 if pinfo is not None:
-    pinfo["field_id"] = field_id_input
+    # Seamlessly sync custom field_id into poly_info without resetting downstream steps
+    if pinfo.get("field_id") != field_id_input:
+        pinfo["field_id"] = field_id_input
+        # Keep GeoJSON feature properties updated
+        if pinfo.get("boundary_geojson_path") and Path(pinfo["boundary_geojson_path"]).exists():
+            try:
+                gj_path = Path(pinfo["boundary_geojson_path"])
+                gj_data = json.loads(gj_path.read_text(encoding="utf-8"))
+                for feat in gj_data.get("features", []):
+                    feat.setdefault("properties", {})["field_id"] = field_id_input
+                gj_path.write_text(json.dumps(gj_data), encoding="utf-8")
+            except Exception:
+                pass
+
     with step1_preview_container:
         st.markdown('<div class="md-output-title">📍 Loaded field boundary summary</div>', unsafe_allow_html=True)
         m1, m2, m3 = st.columns(3)
@@ -1426,7 +1450,11 @@ with tab_api:
     res_c1, res_c2, res_c3 = st.columns([2.0, 1.0, 1.2])
     with res_c1:
         saved_oid_file = SAT_BASE_DIR / active_fid / str(season_input) / "last_planet_order_id.txt"
-        saved_oid = saved_oid_file.read_text(encoding="utf-8").strip() if saved_oid_file.exists() else ""
+        saved_oid = ""
+        if saved_oid_file.exists():
+            saved_oid = saved_oid_file.read_text(encoding="utf-8").strip()
+        elif inferred_default_fid and (SAT_BASE_DIR / inferred_default_fid / str(season_input) / "last_planet_order_id.txt").exists():
+            saved_oid = (SAT_BASE_DIR / inferred_default_fid / str(season_input) / "last_planet_order_id.txt").read_text(encoding="utf-8").strip()
         default_oid = st.session_state.get("last_order_id", saved_oid)
         input_order_id = st.text_input(
             "Planet Order ID:",
@@ -1544,7 +1572,12 @@ with tab_api:
         SAT_BASE_DIR / active_fid / str(season_input),
         SAT_BASE_DIR / active_fid,
     ]
-    if active_fid in ("FIELD_1", "PC3"):
+    if inferred_default_fid and inferred_default_fid != active_fid:
+        candidate_dirs.extend([
+            SAT_BASE_DIR / inferred_default_fid / str(season_input),
+            SAT_BASE_DIR / inferred_default_fid,
+        ])
+    if active_fid in ("FIELD_1", "PC3") or inferred_default_fid in ("FIELD_1", "PC3"):
         candidate_dirs.extend([
             SAT_BASE_DIR / "FIELD_1" / str(season_input),
             SAT_BASE_DIR / "FIELD_1",
@@ -1580,6 +1613,10 @@ with tab_api:
                 target_fdir = SAT_BASE_DIR / active_fid / str(season_input)
                 if target_fdir.exists():
                     shutil.rmtree(target_fdir, ignore_errors=True)
+                if inferred_default_fid and inferred_default_fid != active_fid:
+                    alt_fdir = SAT_BASE_DIR / inferred_default_fid / str(season_input)
+                    if alt_fdir.exists() and inferred_default_fid not in ("FIELD_1", "PC3"):
+                        shutil.rmtree(alt_fdir, ignore_errors=True)
                 st.rerun()
 
 # ==============================================================================
