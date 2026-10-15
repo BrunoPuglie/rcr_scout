@@ -1039,6 +1039,61 @@ def _planet_request(
     return resp
 
 
+def _extract_item_filename(item: dict) -> str:
+    """Safely extracts the file name from a Planet Orders API result item."""
+    for k in ("name", "path", "filename", "file_name"):
+        val = item.get(k)
+        if val and isinstance(val, str):
+            return Path(val).name
+    loc = item.get("location") or ""
+    if loc and isinstance(loc, str):
+        base_loc = loc.split("?")[0].rstrip("/")
+        cand = Path(base_loc).name
+        if cand and ("." in cand):
+            return cand
+    return ""
+
+
+def _download_planet_file(loc: str, target_path: Path, clean_key: str):
+    """Downloads a file from Planet Orders API results handling S3 signed URLs and Planet API auth."""
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    if "api.planet.com" in loc:
+        resp = _planet_request("GET", loc, api_key=clean_key, stream=True, timeout=180)
+        resp.raise_for_status()
+        with open(target_path, "wb") as f_out:
+            for chunk in resp.iter_content(chunk_size=32768):
+                if chunk:
+                    f_out.write(chunk)
+    else:
+        with requests.get(loc, stream=True, timeout=180) as r_dl:
+            if r_dl.status_code in (401, 403):
+                r_dl.close()
+                r_dl = _planet_request("GET", loc, api_key=clean_key, stream=True, timeout=180)
+            r_dl.raise_for_status()
+            with open(target_path, "wb") as f_out:
+                for chunk in r_dl.iter_content(chunk_size=32768):
+                    if chunk:
+                        f_out.write(chunk)
+
+
+def _unpack_zip_archive(zip_path: Path, extract_dir: Path) -> List[str]:
+    """Unpacks a ZIP archive into extract_dir and returns paths to all valid GeoTIFF rasters."""
+    extracted_tifs = []
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            for member in zf.namelist():
+                m_name = Path(member).name
+                if m_name.lower().endswith((".tif", ".tiff", ".geotif", ".geotiff")) and "udm" not in m_name.lower():
+                    target_file = extract_dir / m_name
+                    with zf.open(member) as z_in, open(target_file, "wb") as f_out:
+                        shutil.copyfileobj(z_in, f_out)
+                    extracted_tifs.append(str(target_file))
+    except Exception as e:
+        print(f"Warning: Failed to unpack ZIP bundle {zip_path.name}: {e}")
+    return extracted_tifs
+
+
 def get_planet_order_status(api_key: str, order_id: str) -> Dict[str, Any]:
     """
     Queries the current status of an order in Planet Orders API v2.
@@ -1063,12 +1118,13 @@ def get_planet_order_status(api_key: str, order_id: str) -> Dict[str, Any]:
 
     data = resp.json()
     state = str(data.get("state", "unknown")).lower()
-    results = data.get("_links", {}).get("results", [])
-    tif_items = [
-        item for item in results
-        if Path(item.get("name", "")).name.lower().endswith(".tif")
-        and "udm" not in Path(item.get("name", "")).name.lower()
-    ]
+    results = data.get("_links", {}).get("results") or data.get("results") or []
+    
+    raster_items = []
+    for item in results:
+        fname = _extract_item_filename(item).lower()
+        if (fname.endswith((".tif", ".tiff", ".geotif", ".geotiff")) and "udm" not in fname) or fname.endswith(".zip"):
+            raster_items.append(item)
 
     return {
         "status": "ok",
@@ -1076,7 +1132,7 @@ def get_planet_order_status(api_key: str, order_id: str) -> Dict[str, Any]:
         "state": state,
         "created_at": data.get("created_on", ""),
         "last_message": data.get("last_message", ""),
-        "raster_count": len(tif_items),
+        "raster_count": len(raster_items),
         "is_ready": state in ("success", "partial"),
         "is_processing": state in ("queued", "running", "preparing", "starting"),
         "is_failed": state in ("failed", "cancelled"),
@@ -1371,37 +1427,74 @@ def download_planet_order_by_id(
             )
 
         if state in ("success", "partial"):
-            results = data.get("_links", {}).get("results", [])
+            results = data.get("_links", {}).get("results") or data.get("results") or []
+            
             tif_items = [
                 item for item in results
-                if Path(item.get("name", "")).name.lower().endswith(".tif")
-                and "udm" not in Path(item.get("name", "")).name.lower()
-                and ("sr" in Path(item.get("name", "")).name.lower() or "analytic" in Path(item.get("name", "")).name.lower())
+                if _extract_item_filename(item).lower().endswith((".tif", ".tiff", ".geotif", ".geotiff"))
+                and "udm" not in _extract_item_filename(item).lower()
+                and ("sr" in _extract_item_filename(item).lower() or "analytic" in _extract_item_filename(item).lower())
             ]
             if not tif_items:
                 tif_items = [
                     item for item in results
-                    if Path(item.get("name", "")).name.lower().endswith(".tif")
-                    and "udm" not in Path(item.get("name", "")).name.lower()
+                    if _extract_item_filename(item).lower().endswith((".tif", ".tiff", ".geotif", ".geotiff"))
+                    and "udm" not in _extract_item_filename(item).lower()
                 ]
 
-            if not tif_items:
-                raise ValueError(f"Planet Order '{clean_order_id}' completed with state '{state}', but no clipped GeoTIFF rasters were found in results.")
+            zip_items = [
+                item for item in results
+                if _extract_item_filename(item).lower().endswith(".zip")
+            ]
+
+            if not tif_items and not zip_items:
+                all_names = [_extract_item_filename(item) for item in results if _extract_item_filename(item)]
+                if not results:
+                    raise ValueError(
+                        f"Planet Order '{clean_order_id}' completed with state '{state}', but returned 0 download files. "
+                        "This typically occurs if the order's temporary download links have expired (Planet download URLs expire after 24–48 hours) "
+                        "or if assets were delivered directly to cloud storage. "
+                        "Please place a new clip order in Step 3 (Search & Order), or upload the GeoTIFFs downloaded from Planet Explorer in Option A."
+                    )
+                else:
+                    raise ValueError(
+                        f"Planet Order '{clean_order_id}' completed with state '{state}', but no clipped GeoTIFF rasters or ZIP archives were found in results. "
+                        f"Items found in order: {all_names}. "
+                        "If you already downloaded this order from Planet Explorer, please upload the GeoTIFFs directly in Option A above."
+                    )
 
             downloaded_tifs = []
-            total_items = len(tif_items)
-            for idx, item in enumerate(tif_items):
-                name = Path(item.get("name", "")).name
-                loc = item["location"]
-                target_path = out_dir / name
-                if status_callback:
-                    status_callback(f"Downloading clipped GeoTIFF ({idx + 1}/{total_items}): {name}...")
-                with requests.get(loc, stream=True, timeout=180) as r_dl:
-                    r_dl.raise_for_status()
-                    with open(target_path, "wb") as f_out:
-                        for chunk in r_dl.iter_content(chunk_size=16384):
-                            f_out.write(chunk)
-                downloaded_tifs.append(str(target_path))
+            if tif_items:
+                total_tifs = len(tif_items)
+                for idx, item in enumerate(tif_items):
+                    name = _extract_item_filename(item) or f"planet_scene_{idx + 1}.tif"
+                    loc = item["location"]
+                    target_path = out_dir / name
+                    if status_callback:
+                        status_callback(f"Downloading clipped GeoTIFF ({idx + 1}/{total_tifs}): {name}...")
+                    _download_planet_file(loc, target_path, clean_key)
+                    downloaded_tifs.append(str(target_path))
+
+            if zip_items:
+                total_zips = len(zip_items)
+                for idx, item in enumerate(zip_items):
+                    zname = _extract_item_filename(item) or f"order_{clean_order_id}_{idx + 1}.zip"
+                    loc = item["location"]
+                    zip_path = out_dir / zname
+                    if status_callback:
+                        status_callback(f"Downloading order ZIP bundle ({idx + 1}/{total_zips}): {zname}...")
+                    _download_planet_file(loc, zip_path, clean_key)
+                    if status_callback:
+                        status_callback(f"Unpacking ZIP bundle {zname}...")
+                    unpacked = _unpack_zip_archive(zip_path, out_dir)
+                    downloaded_tifs.extend(unpacked)
+
+            if not downloaded_tifs:
+                raise ValueError(
+                    f"Planet Order '{clean_order_id}' completed with state '{state}', but no valid .tif rasters were found or extracted."
+                )
+
+            downloaded_tifs = list(dict.fromkeys(downloaded_tifs))
 
             if status_callback:
                 status_callback(f"Downloaded {len(downloaded_tifs)} clipped PlanetScope GeoTIFF(s) successfully!")
@@ -1505,8 +1598,13 @@ def submit_and_download_planet_clip_order(
 
 def parse_date_from_filename(filename: str) -> Optional[str]:
     """Extracts an 8-digit YYYYMMDD date string from a PlanetScope filename."""
-    match = re.search(r"(202[0-9][01][0-9][0-3][0-9])", filename)
-    return match.group(1) if match else None
+    m1 = re.search(r"(20[1-3][0-9][01][0-9][0-3][0-9])", filename)
+    if m1:
+        return m1.group(1)
+    m2 = re.search(r"(20[1-3][0-9])[-_]([01][0-9])[-_]([0-3][0-9])", filename)
+    if m2:
+        return f"{m2.group(1)}{m2.group(2)}{m2.group(3)}"
+    return None
 
 
 def find_local_field_tifs(field_id: str, season: str) -> Dict[str, Path]:
@@ -1532,9 +1630,11 @@ def find_local_field_tifs(field_id: str, season: str) -> Dict[str, Path]:
         if d.exists():
             tifs = [
                 f for f in d.rglob("*.tif*")
-                if "udm" not in f.name.lower() and ("sr" in f.name.lower() or "analytic" in f.name.lower())
+                if f.is_file() and "udm" not in f.name.lower()
             ]
-            for tif in sorted(tifs):
+            sr_tifs = [f for f in tifs if "sr" in f.name.lower() or "analytic" in f.name.lower()]
+            use_tifs = sr_tifs if sr_tifs else tifs
+            for tif in sorted(use_tifs):
                 d_str = parse_date_from_filename(tif.name)
                 if d_str and d_str.startswith(str(season)):
                     found[d_str] = tif
@@ -1704,6 +1804,12 @@ def run_multi_date_rcr_classification(
 
     # Step A: Early-season canopy mask (mean - mask_sigma * SD)
     early_img, early_meta = _clip_raster_to_polygon(early_tif_path, poly_gdf)
+    if early_img.shape[0] < 8:
+        raise ValueError(
+            f"The early baseline raster '{early_tif_path.name}' has only {early_img.shape[0]} band(s). "
+            "The Red Crown Rot model requires 8-band PlanetScope SuperDove Surface Reflectance imagery "
+            "(analytic_8b_sr_udm2)."
+        )
     early_red = early_img[5].astype("float32") / 10000.0  # Band 6 (Red)
     early_nir = early_img[7].astype("float32") / 10000.0  # Band 8 (NIR)
 
@@ -1723,6 +1829,12 @@ def run_multi_date_rcr_classification(
 
     for role_label, target_date_str, target_tif_path in target_captures:
         target_img, out_meta = _clip_raster_to_polygon(target_tif_path, poly_gdf)
+        if target_img.shape[0] < 8:
+            raise ValueError(
+                f"The classification raster '{target_tif_path.name}' has only {target_img.shape[0]} band(s). "
+                "The Red Crown Rot model requires 8-band PlanetScope SuperDove Surface Reflectance imagery "
+                "(analytic_8b_sr_udm2)."
+            )
         h, w = out_meta["height"], out_meta["width"]
 
         aligned_canopy_mask = np.zeros((h, w), dtype=np.uint8)

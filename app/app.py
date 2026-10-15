@@ -221,8 +221,13 @@ def run_worker(payload: Dict) -> Dict:
 
 
 def parse_date_from_filename(filename: str) -> Optional[str]:
-    match = re.search(r"(202[0-9][01][0-9][0-3][0-9])", filename)
-    return match.group(1) if match else None
+    m1 = re.search(r"(20[1-3][0-9][01][0-9][0-3][0-9])", filename)
+    if m1:
+        return m1.group(1)
+    m2 = re.search(r"(20[1-3][0-9])[-_]([01][0-9])[-_]([0-3][0-9])", filename)
+    if m2:
+        return f"{m2.group(1)}{m2.group(2)}{m2.group(3)}"
+    return None
 
 
 def format_yyyymmdd_iso(d_str: str) -> str:
@@ -1214,6 +1219,31 @@ if "step3_imagery_tab" not in st.session_state:
     else:
         st.session_state["step3_imagery_tab"] = STEP3_TAB_OPTIONS[0]
 
+def _render_planet_error(exc: Exception, order_id: Optional[str] = None):
+    err_str = str(exc)
+    oid_txt = f" for Order ID `{order_id}`" if order_id else ""
+    if "401" in err_str or "unauthorized" in err_str.lower() or "authentication failed" in err_str.lower():
+        st.error(
+            f"🔑 **Planet API authentication failed (401 Unauthorized)**{oid_txt}.\n\n"
+            f"**Please verify:**\n"
+            f"1. Your Planet API key in the **Personal Planet API key** field above is correct.\n"
+            f"2. Your Planet user account has active permissions to access this order.\n"
+            f"3. You can verify your key anytime in your [Planet account settings](https://www.planet.com/account/)."
+        )
+    elif "404" in err_str or "not found" in err_str.lower():
+        st.error(
+            f"🔍 **Planet Order not found (404)**{oid_txt}. Please verify that the 36-character Order UUID was entered correctly."
+        )
+    elif "expired" in err_str.lower() or "no clipped geotiff rasters" in err_str.lower() or "0 download files" in err_str.lower():
+        st.error(
+            f"📦 **Planet Order rasters unavailable**{oid_txt}.\n\n"
+            f"{err_str}\n\n"
+            f"💡 **Tip:** If you already downloaded this order from Planet Explorer, switch to **Option A (Upload downloaded PlanetScope GeoTIFFs)** above "
+            f"to upload the GeoTIFF file(s) or ZIP bundle directly."
+        )
+    else:
+        st.error(f"Planet request error: {err_str}")
+
 tab_manual, tab_api = st.tabs(
     STEP3_TAB_OPTIONS,
     key="step3_imagery_tab",
@@ -1234,48 +1264,57 @@ selected_early_date: Optional[str] = None
 available_classification_captures: List[Dict[str, str]] = []  # [{"date_str": "20250808", "date_iso": "2025-08-08", "path": "..."}]
 
 # ------------------------------------------------------------------------------
-# TAB A: UPLOAD DOWNLOADED PLANETSCOPE .TIF FILES ONLY
+# TAB A: UPLOAD DOWNLOADED PLANETSCOPE .TIF FILES OR ORDER ZIP
 # ------------------------------------------------------------------------------
 with tab_manual:
     st.markdown(
-        "Upload the **8-band surface reflectance PlanetScope GeoTIFFs** downloaded from **Planet Explorer**."
+        "Upload the **8-band Surface Reflectance PlanetScope GeoTIFFs** (`.tif`, `.tiff`) or an **Order ZIP bundle** (`.zip`) "
+        "downloaded from **Planet Explorer**."
     )
 
-    u1, u2 = st.columns(2, gap="large")
-    with u1:
-        up_early = st.file_uploader(
-            "1. Upload early baseline PlanetScope GeoTIFF (peak canopy mask):",
-            type=["tif", "tiff"],
-            key="up_early_tif",
-        )
-    with u2:
-        up_targets = st.file_uploader(
-            "2. Upload PlanetScope GeoTIFF(s) for classification dates:",
-            type=["tif", "tiff"],
-            accept_multiple_files=True,
-            key="up_target_tifs",
-        )
+    up_files = st.file_uploader(
+        "Upload PlanetScope GeoTIFF(s) or Order ZIP file:",
+        type=["tif", "tiff", "zip"],
+        accept_multiple_files=True,
+        key="up_planet_tifs_multi",
+        help="Upload one or multiple .tif/.tiff GeoTIFF files, or the full .zip bundle downloaded from Planet Explorer.",
+    )
 
-    if up_early and up_targets:
-        save_dir = SAT_BASE_DIR / active_fid / str(season_input)
-        save_dir.mkdir(parents=True, exist_ok=True)
+    save_dir = SAT_BASE_DIR / active_fid / str(season_input)
+    save_dir.mkdir(parents=True, exist_ok=True)
 
-        early_path = save_dir / Path(up_early.name).name
-        early_path.write_bytes(up_early.getvalue())
-        selected_early_date = parse_date_from_filename(up_early.name) or f"{season_input}0701"
+    if up_files:
+        staged_paths = list(st.session_state.get("manual_uploaded_files", []))
+        added_count = 0
+        for uf in up_files:
+            raw_bytes = uf.getvalue()
+            uf_name = Path(uf.name).name
+            if uf_name.lower().endswith(".zip"):
+                zip_path = save_dir / uf_name
+                zip_path.write_bytes(raw_bytes)
+                try:
+                    with zipfile.ZipFile(zip_path, "r") as zf:
+                        for member in zf.namelist():
+                            m_name = Path(member).name
+                            if m_name.lower().endswith((".tif", ".tiff", ".geotif", ".geotiff")) and "udm" not in m_name.lower():
+                                ext_path = save_dir / m_name
+                                with zf.open(member) as zf_in, open(ext_path, "wb") as f_out:
+                                    shutil.copyfileobj(zf_in, f_out)
+                                if str(ext_path) not in staged_paths:
+                                    staged_paths.append(str(ext_path))
+                                    added_count += 1
+                except Exception as zip_err:
+                    st.error(f"Error extracting ZIP archive '{uf_name}': {zip_err}")
+            elif uf_name.lower().endswith((".tif", ".tiff", ".geotif", ".geotiff")):
+                tif_path = save_dir / uf_name
+                tif_path.write_bytes(raw_bytes)
+                if str(tif_path) not in staged_paths:
+                    staged_paths.append(str(tif_path))
+                    added_count += 1
 
-        uploaded_t_paths = []
-        sorted_targets = sorted(up_targets, key=lambda x: parse_date_from_filename(x.name) or x.name)
-        for idx, uf in enumerate(sorted_targets):
-            t_path = save_dir / Path(uf.name).name
-            t_path.write_bytes(uf.getvalue())
-            uploaded_t_paths.append(str(t_path))
-
-        st.session_state["manual_uploaded_files"] = [str(early_path)] + uploaded_t_paths
-        st.success(
-            f"Uploaded 1 early baseline image (`{format_yyyymmdd_iso(selected_early_date)}`) and "
-            f"{len(uploaded_t_paths)} classification image(s)."
-        )
+        st.session_state["manual_uploaded_files"] = staged_paths
+        if added_count > 0:
+            st.success(f"✅ Staged {added_count} PlanetScope GeoTIFF raster(s) for Field `{active_fid}` ({season_input})!")
 
 # ------------------------------------------------------------------------------
 # TAB B: PERSONAL PLANET API KEY (AUTO-SEARCH & CLIP ORDER)
@@ -1498,24 +1537,6 @@ with tab_api:
         else:
             st.warning("⚠️ No captures currently selected. Please check at least one scene in the table above.")
 
-        def _render_planet_error(exc: Exception, order_id: Optional[str] = None):
-            err_str = str(exc)
-            oid_txt = f" for Order ID `{order_id}`" if order_id else ""
-            if "401" in err_str or "unauthorized" in err_str.lower() or "authentication failed" in err_str.lower():
-                st.error(
-                    f"🔑 **Planet API authentication failed (401 Unauthorized)**{oid_txt}.\n\n"
-                    f"**Please verify:**\n"
-                    f"1. Your Planet API key in the **Personal Planet API key** field above is correct.\n"
-                    f"2. Your Planet user account has active permissions to access this order.\n"
-                    f"3. You can verify your key anytime in your [Planet account settings](https://www.planet.com/account/)."
-                )
-            elif "404" in err_str or "not found" in err_str.lower():
-                st.error(
-                    f"🔍 **Planet Order not found (404)**{oid_txt}. Please verify that the 36-character Order UUID was entered correctly."
-                )
-            else:
-                st.error(f"Planet request error: {err_str}")
-
         if st.button(
             f"⬇️ 2. Order & download {len(chosen_scene_ids)} selected scene(s) via Planet API",
             type="primary",
@@ -1707,7 +1728,14 @@ for cdir in candidate_dirs:
     if cdir.exists():
         for f in cdir.rglob("*.tif*"):
             if f.is_file() and "udm" not in f.name.lower() and f.name not in discovered_rasters_map:
-                if "sr" in f.name.lower() or "analytic" in f.name.lower() or "clip" in f.name.lower():
+                discovered_rasters_map[f.name] = f
+
+# Fallback: check any directories under SAT_BASE_DIR that have tifs for this season
+if not discovered_rasters_map:
+    for s_dir in SAT_BASE_DIR.glob(f"*/{season_input}"):
+        if s_dir.is_dir():
+            for f in s_dir.rglob("*.tif*"):
+                if f.is_file() and "udm" not in f.name.lower() and f.name not in discovered_rasters_map:
                     discovered_rasters_map[f.name] = f
 
 # Sort rasters chronologically
@@ -1790,11 +1818,20 @@ else:
         )
 
     with col_targets:
-        remaining_rasters = [p for p in all_available_rasters if p != selected_peak_path]
+        if len(all_available_rasters) == 1:
+            target_options = all_available_rasters
+            target_default = all_available_rasters
+            st.caption("ℹ️ **Single capture mode:** Evaluating this capture date using its own canopy mask as baseline.")
+        else:
+            target_options = all_available_rasters
+            target_default = [p for p in all_available_rasters if p != selected_peak_path]
+            if not target_default:
+                target_default = all_available_rasters
+
         selected_target_paths = st.multiselect(
             "2. Classification capture date(s) to evaluate:",
-            options=remaining_rasters,
-            default=remaining_rasters,
+            options=target_options,
+            default=target_default,
             format_func=_format_raster_display,
             help="Select one or multiple capture dates to run through the 13-feature RCR machine learning classifier.",
             key="classification_targets_select",

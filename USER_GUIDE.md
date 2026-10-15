@@ -106,17 +106,17 @@ Google Earth Engine requires each user to have their own Google Cloud Project ID
 ### Step 3: Provide PlanetScope Imagery
 You need 8-band Surface Reflectance PlanetScope SuperDove GeoTIFFs (`PSScene` / `ortho_analytic_8b_sr`) covering the field:
 
-- **Option A: Upload Downloaded GeoTIFFs (.tif)**
+- **Option A: Upload Downloaded GeoTIFFs (.tif, .tiff) or Order ZIP (.zip)**
   - If you download your images directly from [Planet Explorer](https://www.planet.com/explorer/):
-  - In sub-panel 1, upload your **early baseline GeoTIFF** (peak canopy date, typically late July).
-  - In sub-panel 2, upload your **classification GeoTIFF(s)** (around the target scouting date).
+  - Drag and drop one or multiple `.tif` / `.tiff` files, or upload the complete `.zip` order archive directly. The platform will automatically unpack and stage all valid GeoTIFFs.
+  - You can upload a single image (which will be evaluated using its own canopy mask) or a multi-date time series.
 - **Option B: Personal Planet API Key (Auto-Search & Order)**
   - Enter your Planet API key (found in [Planet account settings](https://www.planet.com/account/)).
   - Specify the season search window (default May 1 to October 31) and maximum cloud cover.
   - Click **"🔍 Search Planet Catalog"**. The platform displays available cloud-free scenes and highlights the dates closest to your optimal scouting recommendations.
   - Select the scenes you want and click **"⬇️ Order & download selected scenes"**.
   - Planet will clip the scenes to your exact field polygon and download them automatically.
-  - *Order in progress?* If an order takes time to clip, copy the 36-character **Order ID** and use the **"Resume or download existing Planet order"** panel anytime.
+  - *Order in progress or downloaded via web?* If an order takes time to clip, copy the 36-character **Order ID** and use the **"Resume or download existing Planet order by Order ID"** card. If the order was packaged as a `.zip` or direct rasters, it will be automatically retrieved and staged. If download links have expired (after 24–48 hours), you can upload the downloaded `.zip` or `.tif` files in Option A.
 
 ---
 

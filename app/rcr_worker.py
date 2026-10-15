@@ -304,7 +304,7 @@ def main():
                     mismatches = []
                     for fpath_str in dl_files:
                         fpath = Path(fpath_str)
-                        if fpath.exists() and fpath.suffix.lower() == ".tif":
+                        if fpath.exists() and fpath.suffix.lower() in (".tif", ".tiff"):
                             with rasterio.open(fpath) as src:
                                 poly_proj = poly_gdf.to_crs(src.crs)
                                 poly_geom = poly_proj.geometry.unary_union
