@@ -76,22 +76,22 @@ Google Earth Engine requires each user to have their own Google Cloud Project ID
 [ Step 1: Upload Field Boundary ]  -->  [ Step 2: NDVI Progress Analysis ]  -->  [ Step 3: Stage Imagery ]  -->  [ Step 4: RCR Detection & Maps ]
 ```
 
-### Step 1: Upload Field Boundary & Select Season
+### Step 1: Upload Field Boundary Polygon
 1. In **Step 1**, drag and drop your field boundary file:
    - Supported vector formats:
      - **Shapefile** (either a `.zip` containing `.shp, .shx, .dbf, .prj`, or upload the individual files together)
      - **GeoPackage** (`.gpkg`)
      - **GeoJSON** (`.geojson` / `.json`)
      - **KML** (`.kml`)
-   - *Tip:* A sample test field (`sample_field.geojson`) is included in the `sample_data/` folder for immediate testing.
-2. Enter your **Field ID** (e.g., `FIELD_1`) and select the **Soybean Season (Year)**.
+2. Enter or edit your **Field ID** (e.g., `FIELD_1`).
 3. The platform immediately calculates the field's area in **hectares** and **acres** and renders a high-resolution boundary preview.
 
 ---
 
-### Step 2: Sentinel-2 NDVI Season Progress (Optional Date Discovery)
-1. Ensure your **Google Earth Engine project ID** is filled in the left sidebar (or skip to Step 3 if you already have imagery).
-2. Click **"🚀 Run Sentinel-2 NDVI season progress analysis"**.
+### Step 2: Select Soybean Season & Sentinel-2 Scouting Recommendations
+1. Select your target **Soybean Season (Year)** (e.g., `2025`). This season applies to Step 2 phenology tracking, Step 3 satellite staging, and Step 4 classification.
+2. (Optional) Ensure your **Google Earth Engine project ID** is filled in the left sidebar (or skip to Step 3 if you already have imagery).
+3. Click **"🚀 Run Sentinel-2 NDVI season progress analysis"**.
 3. The platform extracts cloud-masked Sentinel-2 NDVI observations and computes a daily continuous trajectory.
 4. It displays 4 recommended scouting dates:
    - **1. Early Baseline Mask ($t_{\text{peak}}$)**: Date of peak canopy growth.

@@ -73,6 +73,8 @@ from datetime import datetime
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 import geopandas as gpd
 import pandas as pd
+import rasterio
+from shapely.geometry import box
 
 from rcr_engine import (
     create_results_zip_bytes,
@@ -287,6 +289,35 @@ def main():
                 status_callback=_cb,
                 max_wait_minutes=max_wait,
             )
+
+            # Spatial overlap check against current field boundary if supplied
+            boundary_path = req.get("boundary_geojson_path")
+            if boundary_path and Path(boundary_path).exists() and order_res.get("downloaded_files"):
+                try:
+                    poly_gdf = _load_geojson_pure(boundary_path)
+                    dl_files = order_res.get("downloaded_files", [])
+                    mismatches = []
+                    for fpath_str in dl_files:
+                        fpath = Path(fpath_str)
+                        if fpath.exists() and fpath.suffix.lower() == ".tif":
+                            with rasterio.open(fpath) as src:
+                                poly_proj = poly_gdf.to_crs(src.crs)
+                                poly_geom = poly_proj.geometry.unary_union
+                                poly_b = box(*poly_geom.bounds)
+                                raster_b = box(*src.bounds)
+                                if not poly_b.intersects(raster_b):
+                                    dist_km = poly_b.centroid.distance(raster_b.centroid) / 1000.0
+                                    mismatches.append(round(dist_km, 1))
+                    if mismatches:
+                        order_res["spatial_warning"] = (
+                            f"The imagery downloaded from Order ID '{order_id}' does not cover your current field boundary ('{field_id}'). "
+                            f"The raster center is ~{mismatches[0]} km away. "
+                            "In Planet's system, Order IDs are permanently tied to the specific field boundary used when creating the order. "
+                            "To inspect this field, please submit a new clip order for this field boundary in Step 3."
+                        )
+                except Exception:
+                    pass
+
             resp = order_res
 
         elif action == "check_planet_order":

@@ -92,13 +92,10 @@ rcr_scout/
 │   ├── rcr_worker.py               # Subprocess worker ensuring GDAL/Conda isolation
 │   └── fonts/                      # Montserrat typography assets
 │
-├── model/
-│   ├── rcrc_3_1_probability_model.joblib          # Calibrated RCR probability model
-│   ├── rcrc_3_1_threshold_044_classifier.joblib  # Calibrated discrete classifier
-│   └── rcrc_3_1_model_metadata.json               # Model training metadata & features
-│
-└── sample_data/
-    └── sample_field.geojson        # Test field boundary for immediate trial
+└── model/
+    ├── rcrc_3_1_probability_model.joblib          # Calibrated RCR probability model
+    ├── rcrc_3_1_threshold_044_classifier.joblib  # Calibrated discrete classifier
+    └── rcrc_3_1_model_metadata.json               # Model training metadata & features
 ```
 
 ---

@@ -73,6 +73,7 @@ from rasterio.mask import mask
 from rasterio.warp import Resampling, reproject
 import requests
 import shapely
+from shapely.geometry import box
 from shapely.ops import unary_union
 
 # ==============================================================================
@@ -242,12 +243,27 @@ def load_uploaded_or_local_polygon(
         else:
             gdf = gdf.set_crs("EPSG:32615")
 
-    # Convert to pure 2D geometry (strips Z dimension if Polygon Z) and dissolve multipart
-    clean_geom_2d = unary_union(shapely.force_2d(gdf.geometry.values))
+    # Convert to pure 2D geometry (strips Z dimension) and filter to polygon geometries only
+    # (safely ignoring points, waypoints, lines that may exist in Google Earth KML files)
+    poly_geoms = [
+        geom for geom in shapely.force_2d(gdf.geometry.values)
+        if geom.geom_type in ("Polygon", "MultiPolygon") and not geom.is_empty
+    ]
+    if not poly_geoms:
+        raise ValueError(
+            f"No polygon boundaries found in the uploaded file. "
+            "Please ensure your KML or shapefile contains a closed polygon."
+        )
+
+    clean_geom_2d = unary_union(poly_geoms)
     gdf_clean = gpd.GeoDataFrame({"field_id": [inferred_id]}, geometry=[clean_geom_2d], crs=gdf.crs)
 
     gdf_wgs84 = gdf_clean.to_crs("EPSG:4326")
-    gdf_utm = gdf_wgs84.to_crs("EPSG:32615")
+    try:
+        utm_crs = gdf_wgs84.estimate_utm_crs()
+        gdf_utm = gdf_wgs84.to_crs(utm_crs)
+    except Exception:
+        gdf_utm = gdf_wgs84.to_crs("EPSG:32615")
     area_m2 = float(gdf_utm.geometry.area.sum())
     area_ha = round(area_m2 / 10000.0, 2)
     area_acres = round(area_ha * 2.47105, 2)
@@ -1399,8 +1415,12 @@ def find_local_field_tifs(field_id: str, season: str) -> Dict[str, Path]:
         SAT_BASE_DIR / field_id,
         SAT_BASE_DIR / field_id.replace("-", "_"),
         SAT_BASE_DIR / field_id.replace("_", "-"),
-        SAT_BASE_DIR,
     ]
+    if field_id in ("FIELD_1", "PC3"):
+        candidate_dirs.extend([
+            SAT_BASE_DIR / "FIELD_1" / str(season),
+            SAT_BASE_DIR / "PC3" / str(season),
+        ])
     found: Dict[str, Path] = {}
     for d in candidate_dirs:
         if d.exists():
@@ -1477,10 +1497,50 @@ def auto_match_four_dates(
 # ==============================================================================
 
 def _clip_raster_to_polygon(raster_path: Path, poly_gdf: gpd.GeoDataFrame):
-    with rasterio.open(raster_path) as src:
+    r_path = Path(raster_path)
+    with rasterio.open(r_path) as src:
         bounds_projected = poly_gdf.to_crs(src.crs)
-        shapes = [geom for geom in bounds_projected.geometry]
-        clipped_img, clipped_transform = mask(src, shapes, crop=True, nodata=0)
+        poly_geom = bounds_projected.geometry.unary_union
+        poly_box = box(*poly_geom.bounds)
+        raster_box = box(*src.bounds)
+
+        # Helper to compute distance between centroids safely
+        def _calc_dist_km():
+            try:
+                pc = poly_box.centroid
+                rc = raster_box.centroid
+                if not (np.isnan(pc.x) or np.isnan(pc.y) or np.isnan(rc.x) or np.isnan(rc.y)):
+                    return round(pc.distance(rc) / 1000.0, 1)
+            except Exception:
+                pass
+            return None
+
+        # Validate spatial intersection before invoking mask
+        if not poly_box.intersects(raster_box):
+            dist_km = _calc_dist_km()
+            dist_str = f"approximately {dist_km:.1f} km away" if dist_km is not None else "in a different geographic region"
+            raise ValueError(
+                f"Spatial overlap error: Field boundary does not overlap GeoTIFF raster '{r_path.name}'. "
+                f"The raster is located {dist_str} from your field. "
+                "This occurs when using a Planet Order ID or GeoTIFF that was created for a different field. "
+                "In Planet's system, Order IDs are permanently tied to the exact field boundary submitted at ordering time. "
+                "To scout this field, please submit a new clip order for this field boundary in Step 3."
+            )
+
+        shapes = [poly_geom]
+        try:
+            clipped_img, clipped_transform = mask(src, shapes, crop=True, nodata=0)
+        except ValueError as val_err:
+            if "do not overlap" in str(val_err).lower():
+                dist_km = _calc_dist_km()
+                dist_str = f"~{dist_km:.1f} km" if dist_km is not None else "far"
+                raise ValueError(
+                    f"Spatial overlap error: Field boundary does not overlap GeoTIFF raster '{r_path.name}'. "
+                    f"Distance between centers: {dist_str}. "
+                    "This occurs when using imagery from a Planet Order ID created for a different field."
+                ) from val_err
+            raise
+
         meta = src.meta.copy()
         meta.update({
             "height": clipped_img.shape[1],

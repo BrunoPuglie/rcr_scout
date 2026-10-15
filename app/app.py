@@ -100,10 +100,9 @@ def get_session_workdir() -> Path:
 
 
 def get_library_boundary_files() -> Dict[str, Path]:
-    """Finds all available pre-loaded field boundary files in workspace/field_boundaries, sample_data, and project folders."""
+    """Finds all available pre-loaded field boundary files in workspace/field_boundaries and project folders."""
     search_dirs = [
         WORKSPACE_DIR / "field_boundaries",
-        STANDALONE_ROOT / "sample_data",
         STANDALONE_ROOT.parent / "rcrc" / "data" / "raw" / "vectors" / "field_boudaries",
         STANDALONE_ROOT.parent / "rcrc" / "data" / "raw" / "vectors" / "field_boundaries",
     ]
@@ -111,6 +110,8 @@ def get_library_boundary_files() -> Dict[str, Path]:
     for sdir in search_dirs:
         if sdir.exists():
             for p in sorted(sdir.glob("*.shp")) + sorted(sdir.glob("*.geojson")) + sorted(sdir.glob("*.gpkg")):
+                if "sample" in p.name.lower():
+                    continue
                 clean_name = re.sub(r"^(boun[d]?|boundary|field)[_-]?", "", p.stem, flags=re.IGNORECASE).strip().upper()
                 label = f"{clean_name} ({p.name})"
                 if label not in files_map:
@@ -577,8 +578,8 @@ st.markdown(
         <div>
             <div class="md-hero-title">RCR scouting</div>
             <p class="md-hero-subtitle">
-                Upload field boundary &amp; soybean season &rarr; Extract continuous Sentinel-2 NDVI trajectory &rarr;
-                Generate PlanetScope RCR probability &amp; classification maps
+                Upload field boundary &rarr; Select soybean season &amp; Sentinel-2 trajectory &rarr;
+                Stage PlanetScope imagery &rarr; Generate RCR probability &amp; classification maps
             </p>
         </div>
         <div class="md-lab-badge">
@@ -750,14 +751,14 @@ with st.sidebar:
     )
 
 # ==============================================================================
-# STEP 1: UPLOAD FIELD POLYGON & SOYBEAN SEASON
+# STEP 1: UPLOAD FIELD POLYGON
 # ==============================================================================
 
 st.markdown(
     """
     <div class="md-step-header">
         <span class="md-step-chip">Step 1</span>
-        <span class="md-step-title">Upload field boundary polygon &amp; select soybean season</span>
+        <span class="md-step-title">Upload field boundary polygon</span>
     </div>
     """,
     unsafe_allow_html=True,
@@ -768,13 +769,14 @@ step1_preview_container = st.container()
 
 lib_boundaries = get_library_boundary_files()
 
+boundary_options = ["📤 Upload custom boundary files (.shp, .zip, .geojson, .gpkg, .kml)"]
+if lib_boundaries:
+    boundary_options.append(f"📁 Select from Field Library ({len(lib_boundaries)} pre-loaded research fields)")
+
 boundary_mode = st.radio(
     "Field boundary source:",
-    options=[
-        "📁 Select from Field Library (18 pre-loaded research fields)",
-        "📤 Upload custom boundary files (.shp, .zip, .geojson, .gpkg, .kml)",
-    ],
-    index=0 if lib_boundaries else 1,
+    options=boundary_options,
+    index=0,
     horizontal=True,
     key="boundary_source_mode",
 )
@@ -785,19 +787,19 @@ selected_lib_path: Optional[Path] = None
 uploaded_polys = None
 
 if boundary_mode.startswith("📁") and lib_boundaries:
-    default_idx = next((i for i, k in enumerate(lib_boundaries.keys()) if "PC3" in k), 0)
     selected_label = st.selectbox(
         "Choose field boundary polygon:",
-        options=list(lib_boundaries.keys()),
-        index=default_idx,
+        options=["-- Select a field boundary --"] + list(lib_boundaries.keys()),
+        index=0,
         key="selected_library_field",
     )
-    selected_lib_path = lib_boundaries[selected_label]
-    target_vector_path = selected_lib_path
-    inferred_default_fid = (
-        re.sub(r"^(boun[d]?|boundary|field)[_-]?", "", selected_lib_path.stem, flags=re.IGNORECASE).strip().upper()
-        or "FIELD_1"
-    )
+    if selected_label and selected_label != "-- Select a field boundary --":
+        selected_lib_path = lib_boundaries[selected_label]
+        target_vector_path = selected_lib_path
+        inferred_default_fid = (
+            re.sub(r"^(boun[d]?|boundary|field)[_-]?", "", selected_lib_path.stem, flags=re.IGNORECASE).strip().upper()
+            or "FIELD_1"
+        )
 else:
     uploaded_polys = st.file_uploader(
         "Upload your field boundary polygon (.shp, .gpkg, .geojson, .kml, or .zip):",
@@ -815,22 +817,12 @@ else:
             or "FIELD_1"
         )
 
-season_options = [2026, 2025, 2024, 2023, 2022]
-
-c1, c2 = st.columns(2)
-with c1:
-    field_id_input = st.text_input(
-        "Field ID / name:",
-        value=inferred_default_fid,
-        key=f"fid_input_{inferred_default_fid}",
-    ).strip().upper()
-with c2:
-    season_input = st.selectbox(
-        "Soybean season (year):",
-        options=season_options,
-        index=1,  # Default to 2025
-        key=f"season_select_{inferred_default_fid}",
-    )
+field_id_input = st.text_input(
+    "Field ID / name:",
+    value=inferred_default_fid,
+    key=f"fid_input_{inferred_default_fid}",
+    help="Identifier for this field boundary (used in filenames, reports, and directory paths).",
+).strip().upper() or inferred_default_fid
 
 new_sig = None
 if boundary_mode.startswith("📁") and selected_lib_path:
@@ -840,7 +832,7 @@ elif uploaded_polys:
     for uf in sorted(uploaded_polys, key=lambda x: x.name):
         raw_b = uf.getvalue()
         sig_parts.append(f"{uf.name}:{len(raw_b)}:{hashlib.md5(raw_b[:64]).hexdigest()}")
-    new_sig = hashlib.md5("|".join(sig_parts).encode("utf-8")).hexdigest()
+    new_sig = f"upload:{hashlib.md5('|'.join(sig_parts).encode('utf-8')).hexdigest()}"
 
     if new_sig != st.session_state["poly_sig"]:
         upload_dir = get_session_workdir() / "uploaded_boundary"
@@ -884,10 +876,17 @@ if target_vector_path and new_sig and new_sig != st.session_state["poly_sig"]:
         except Exception as e:
             st.session_state["poly_info"] = None
             st.error(f"Could not read field boundary: {e}")
+elif not target_vector_path and st.session_state.get("poly_sig"):
+    st.session_state["poly_info"] = None
+    st.session_state["poly_sig"] = ""
+    st.session_state["pheno_res"] = None
+    st.session_state["planet_search_res"] = None
+    st.session_state["run_res"] = None
 
 # Render Field ID, area metrics, and polygon figure ABOVE the Step 1 inputs
 pinfo = st.session_state.get("poly_info")
 if pinfo is not None:
+    pinfo["field_id"] = field_id_input
     with step1_preview_container:
         st.markdown('<div class="md-output-title">📍 Loaded field boundary summary</div>', unsafe_allow_html=True)
         m1, m2, m3 = st.columns(3)
@@ -899,7 +898,7 @@ if pinfo is not None:
             render_crisp_figure(pinfo["preview_png_path"], use_svg_if_available=True, max_height_px=420)
 
 # ==============================================================================
-# STEP 2: SENTINEL-2 NDVI PHENOLOGY CURVE & CONTINUOUS LINE DATE RECOMMENDATIONS
+# STEP 2: SELECT SOYBEAN SEASON & SENTINEL-2 NDVI SEASON PROGRESS
 # ==============================================================================
 
 st.markdown(
@@ -907,7 +906,7 @@ st.markdown(
     <div class="md-step-divider"></div>
     <div class="md-step-header">
         <span class="md-step-chip">Step 2</span>
-        <span class="md-step-title">Sentinel-2 NDVI season progress &amp; scouting date recommendations</span>
+        <span class="md-step-title">Select soybean season &amp; Sentinel-2 scouting date recommendations</span>
     </div>
     """,
     unsafe_allow_html=True,
@@ -916,16 +915,41 @@ st.markdown(
 st.markdown(
     """
     <div style="background-color:#F8FAFC; border-left:4px solid #3B82F6; padding:0.8rem 1.1rem; border-radius:6px; margin-bottom:1rem; font-size:0.9rem;">
-        <b>🛰️ About Sentinel-2 Phenology Analysis:</b><br/>
-        This step connects to Google Earth Engine to query Sentinel-2 satellite data over your field to map continuous canopy growth and identify optimal disease scouting dates.<br/>
+        <b>🛰️ About Soybean Season &amp; Sentinel-2 Phenology Analysis:</b><br/>
+        Select the target crop season (year). This step connects to Google Earth Engine to query Sentinel-2 satellite data over your field to map continuous canopy growth and identify optimal disease scouting dates.<br/>
         <span style="color:#64748B; font-size:0.85rem;">
-        • <b>Don't have Google Earth Engine?</b> Step 2 is completely optional! You can proceed directly to <b>Step 3</b> to upload PlanetScope imagery.<br/>
+        • <b>Don't have Google Earth Engine?</b> Step 2 date discovery is optional! Choose your season year here, then proceed directly to <b>Step 3</b> to upload PlanetScope imagery.<br/>
         • <b>Using your own Earth Engine account?</b> Enter your Project ID and credentials in the left sidebar under <i>🔑 Earth Engine Access &amp; Credentials</i>.
         </span>
     </div>
     """,
     unsafe_allow_html=True,
 )
+
+season_options = [2026, 2025, 2024, 2023, 2022]
+
+s_col1, s_col2 = st.columns([1, 2])
+with s_col1:
+    season_input = st.selectbox(
+        "Soybean season (year):",
+        options=season_options,
+        index=1,  # Default to 2025
+        key="season_select",
+        help="Select the soybean growing season (year) for Sentinel-2 satellite analysis, scouting dates, and PlanetScope imagery.",
+    )
+with s_col2:
+    st.markdown(
+        f"<div style='padding-top: 1.8rem; font-size: 0.88rem; color: #475569;'>"
+        f"Selected season: <b>{season_input}</b> &bull; Applies to phenology modeling, scouting dates, and imagery staging."
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+if st.session_state.get("active_season") != season_input:
+    if st.session_state.get("active_season") is not None:
+        st.session_state["pheno_res"] = None
+        st.session_state["planet_search_res"] = None
+    st.session_state["active_season"] = season_input
 
 with st.expander("❓ Beginner Guide: How to get a Google Earth Engine account & key (Click to read)", expanded=False):
     st.markdown(
@@ -968,10 +992,13 @@ with st.expander("❓ Beginner Guide: How to get a Google Earth Engine account &
     )
 
 run_pheno_btn = st.button(
-    "🚀 Run Sentinel-2 NDVI season progress analysis (Google Earth Engine)",
+    f"🚀 Run Sentinel-2 NDVI season progress analysis for {season_input} (Google Earth Engine)",
     type="primary",
     disabled=(pinfo is None),
 )
+
+if pinfo is None:
+    st.caption("ℹ️ Please upload your field boundary polygon in **Step 1** to enable Sentinel-2 extraction.")
 
 if run_pheno_btn and pinfo is not None:
     with st.spinner(f"Extracting Sentinel-2 NDVI season progress trajectory for {pinfo['field_id']} ({season_input})..."):
@@ -1398,7 +1425,9 @@ with tab_api:
     )
     res_c1, res_c2, res_c3 = st.columns([2.0, 1.0, 1.2])
     with res_c1:
-        default_oid = st.session_state.get("last_order_id", "191282b5-a60b-49b3-ac9d-d46fd130854e")
+        saved_oid_file = SAT_BASE_DIR / active_fid / str(season_input) / "last_planet_order_id.txt"
+        saved_oid = saved_oid_file.read_text(encoding="utf-8").strip() if saved_oid_file.exists() else ""
+        default_oid = st.session_state.get("last_order_id", saved_oid)
         input_order_id = st.text_input(
             "Planet Order ID:",
             value=default_oid,
@@ -1474,6 +1503,7 @@ with tab_api:
                         "order_id": input_order_id,
                         "field_id": active_fid,
                         "season": str(season_input),
+                        "boundary_geojson_path": pinfo["boundary_geojson_path"] if pinfo else None,
                         "max_wait_minutes": max_order_wait_mins,
                     })
                     st.session_state["last_order_id"] = input_order_id
@@ -1486,6 +1516,8 @@ with tab_api:
                         dl_files = resume_res.get("downloaded_files", [])
                         st.session_state["api_downloaded_files"] = dl_files
                         st.success(f"✅ Successfully downloaded {len(dl_files)} clipped PlanetScope GeoTIFF(s) from Order ID '{input_order_id}' and staged them for Step 4!")
+                        if resume_res.get("spatial_warning"):
+                            st.warning(f"⚠️ **Spatial Mismatch Warning:**\n\n{resume_res['spatial_warning']}")
                         if pinfo is None:
                             st.info("💡 **Next step:** Please upload your field boundary polygon in **Step 1** to proceed with RCR classification in **Step 4**.")
                 except Exception as e:
@@ -1511,12 +1543,16 @@ with tab_api:
     candidate_dirs = [
         SAT_BASE_DIR / active_fid / str(season_input),
         SAT_BASE_DIR / active_fid,
-        SAT_BASE_DIR / "FIELD_1" / str(season_input),
-        SAT_BASE_DIR / "FIELD_1",
-        SAT_BASE_DIR / "FIELD_1" / "2025",
-        SAT_BASE_DIR / "FIELD_1" / "2024",
-        SAT_BASE_DIR,
     ]
+    if active_fid in ("FIELD_1", "PC3"):
+        candidate_dirs.extend([
+            SAT_BASE_DIR / "FIELD_1" / str(season_input),
+            SAT_BASE_DIR / "FIELD_1",
+            SAT_BASE_DIR / "FIELD_1" / "2025",
+            SAT_BASE_DIR / "FIELD_1" / "2024",
+            SAT_BASE_DIR / "PC3" / str(season_input),
+            SAT_BASE_DIR / "PC3",
+        ])
     for cdir in candidate_dirs:
         if cdir.exists():
             for f in cdir.rglob("*.tif*"):
@@ -1534,7 +1570,17 @@ with tab_api:
     if all_available_rasters:
         st.markdown('<div class="md-output-title">📋 Staged PlanetScope imagery for analysis</div>', unsafe_allow_html=True)
         summary_chips = [f"`{format_yyyymmdd_iso(parse_date_from_filename(p.name) or '')}`" for p in all_available_rasters]
-        st.info(f"🛰️ **{len(all_available_rasters)} PlanetScope 8-band GeoTIFF raster(s) ready:** {', '.join(summary_chips)}")
+        col_staged_info, col_clear = st.columns([3.5, 1.2])
+        with col_staged_info:
+            st.info(f"🛰️ **{len(all_available_rasters)} PlanetScope 8-band GeoTIFF raster(s) ready:** {', '.join(summary_chips)}")
+        with col_clear:
+            if st.button("🗑️ Clear staged imagery", help="Removes staged rasters for this field so you can download or upload fresh imagery."):
+                st.session_state["api_downloaded_files"] = []
+                st.session_state["manual_uploaded_files"] = []
+                target_fdir = SAT_BASE_DIR / active_fid / str(season_input)
+                if target_fdir.exists():
+                    shutil.rmtree(target_fdir, ignore_errors=True)
+                st.rerun()
 
 # ==============================================================================
 # STEP 4: CHOOSE CLASSIFICATION DATES & RUN RCR CLASSIFICATION
@@ -1668,7 +1714,23 @@ if run_model_btn and ready_to_classify and pinfo is not None and selected_peak_p
             st.session_state["run_res"] = run_res
             st.success("RCR probability & classification maps generated successfully!")
         except Exception as e:
-            st.error(f"Classification error: {e}")
+            err_msg = str(e)
+            if "Spatial overlap error" in err_msg or "does not overlap" in err_msg.lower():
+                # Extract first clean explanation line
+                clean_lines = [l.strip() for l in err_msg.splitlines() if l.strip() and not l.strip().startswith("Traceback") and not l.strip().startswith("File ") and not l.strip().startswith("raise ")]
+                headline = clean_lines[0] if clean_lines else "Field polygon does not overlap raster."
+                st.error(
+                    f"❌ **Spatial Mismatch Error:** {headline}\n\n"
+                    f"**Why this happened:**\n"
+                    f"- The PlanetScope GeoTIFF raster you selected was clipped to a **different field location** than your currently loaded field boundary (`{active_fid}`).\n"
+                    f"- In Planet's Orders API, Order IDs are permanently bound to the specific field geometry that was provided when placing the order.\n\n"
+                    f"**How to correct this:**\n"
+                    f"1. If you previously entered a Planet Order ID from another field, please click **'🗑️ Clear staged imagery'** in Step 3.\n"
+                    f"2. Under **Step 3 (Option B)**, enter your Planet API key and click **'🔍 1. Search Planet catalog'**.\n"
+                    f"3. Select the dates you want, then click **'⬇️ 2. Order & download selected scene(s)'** to place a new clip order customized for field `{active_fid}`."
+                )
+            else:
+                st.error(f"Classification error: {e}")
 
 if st.session_state["run_res"] is not None:
     rr = st.session_state["run_res"]
