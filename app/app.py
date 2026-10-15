@@ -1,7 +1,7 @@
 """
 app.py
 ======
-RCR scouting
+Red crown rot scouting
 Smart Plant Pathology Lab — University of Illinois Urbana-Champaign
 
 Architecture Note (Windows Conda Stability):
@@ -281,7 +281,7 @@ def render_crisp_figure(
 # ==============================================================================
 
 st.set_page_config(
-    page_title="RCR scouting",
+    page_title="Red crown rot scouting",
     page_icon="🛰️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -579,7 +579,7 @@ st.markdown(
     """
     <div class="md-hero-card">
         <div>
-            <div class="md-hero-title">RCR scouting</div>
+            <div class="md-hero-title">Red crown rot scouting</div>
             <p class="md-hero-subtitle">
                 Upload field boundary &rarr; Select soybean season &amp; Sentinel-2 trajectory &rarr;
                 Stage PlanetScope imagery &rarr; Generate RCR probability &amp; classification maps
@@ -1932,7 +1932,7 @@ st.markdown(
     """
     <div class="md-footer">
         <div>
-            <b style="color:#13294B;">RCR scouting</b> &mdash;
+            <b style="color:#13294B;">Red crown rot scouting</b> &mdash;
             Smart Plant Pathology Lab, Department of Crop Sciences, University of Illinois Urbana-Champaign
         </div>
         <div>
