@@ -73,8 +73,10 @@ from rasterio.mask import mask
 from rasterio.warp import Resampling, reproject
 import requests
 import shapely
-from shapely.geometry import box
+from shapely.geometry import box, shape
 from shapely.ops import unary_union
+
+from planet_files import extract_sr_rasters_from_zip, select_sr_rasters
 
 # ==============================================================================
 # 1. PATHS, PALETTES, FONTS & CONSTANTS
@@ -170,6 +172,7 @@ FEATURE_NAMES = [
 
 PLANET_DATA_API_URL = "https://api.planet.com/data/v1/quick-search"
 PLANET_ORDERS_API_URL = "https://api.planet.com/compute/ops/orders/v2"
+PLANET_SCENE_TILES_URL = "https://tiles.planet.com/data/v1/PSScene/{scene_id}/{z}/{x}/{y}.png"
 
 
 # ==============================================================================
@@ -271,6 +274,149 @@ def load_uploaded_or_local_polygon(
     return gdf_wgs84, inferred_id, area_ha, area_acres
 
 
+def _expand_view_bounds(
+    dst_bounds: Tuple[float, float, float, float],
+    pad_frac: float = 0.10,
+    target_aspect: Optional[float] = None,
+) -> Tuple[float, float, float, float]:
+    """
+    Pads `dst_bounds = (xmin, ymin, xmax, ymax)` (projected metres) by `pad_frac` and, if requested,
+    symmetrically expands them to a `target_aspect` (width/height). Returns `(xmin, ymin, xmax, ymax)`.
+    """
+    xmin, ymin, xmax, ymax = dst_bounds
+    w_field = max(10.0, float(xmax - xmin))
+    h_field = max(10.0, float(ymax - ymin))
+
+    pad_x = max(10.0, w_field * pad_frac)
+    pad_y = max(10.0, h_field * pad_frac)
+    b_xmin = xmin - pad_x
+    b_xmax = xmax + pad_x
+    b_ymin = ymin - pad_y
+    b_ymax = ymax + pad_y
+
+    # If a target aspect ratio is specified, symmetrically expand bounds so the view fills the wide frame
+    if target_aspect is not None and target_aspect > 0:
+        cur_w = b_xmax - b_xmin
+        cur_h = b_ymax - b_ymin
+        cur_aspect = cur_w / max(1e-6, cur_h)
+        if cur_aspect < target_aspect:
+            # Field is squarer/narrower than target aspect: expand horizontally
+            desired_w = cur_h * target_aspect
+            diff_x = (desired_w - cur_w) / 2.0
+            b_xmin -= diff_x
+            b_xmax += diff_x
+        elif cur_aspect > target_aspect:
+            # Field is wider than target aspect: expand vertically
+            desired_h = cur_w / target_aspect
+            diff_y = (desired_h - cur_h) / 2.0
+            b_ymin -= diff_y
+            b_ymax += diff_y
+
+    return b_xmin, b_ymin, b_xmax, b_ymax
+
+
+def _deg2tile(lat_deg: float, lon_deg: float, zoom: int) -> Tuple[int, int]:
+    """Converts WGS84 lat/lon to Web Mercator XYZ tile indices at `zoom`."""
+    import math
+
+    lat_rad = math.radians(max(-85.0511, min(85.0511, lat_deg)))
+    n = 2.0 ** zoom
+    xtile = int((lon_deg + 180.0) / 360.0 * n)
+    ytile = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
+    return xtile, ytile
+
+
+def _fetch_xyz_mosaic_in_memory(
+    fetch_tile: Callable[[int, int, int], Optional[np.ndarray]],
+    dst_crs,
+    view_bounds: Tuple[float, float, float, float],
+    n_bands: int = 3,
+    zoom_candidates: Tuple[int, ...] = (18, 17, 16, 15, 14),
+    max_tiles: int = 28,
+    dst_w: int = 1440,
+) -> np.ndarray:
+    """
+    Generic in-memory XYZ mosaic: picks the highest zoom in `zoom_candidates` needing at most
+    `max_tiles` tiles to cover `view_bounds` (in `dst_crs`), fetches them concurrently with
+    `fetch_tile(z, x, y) -> HxWx n_bands uint8 array | None`, and reprojects the mosaic to `dst_crs`.
+    Returns a `(n_bands, dst_h, dst_w)` uint8 array (missing tiles stay zero).
+    """
+    import concurrent.futures
+    from rasterio.transform import from_origin, from_bounds
+    from rasterio.warp import transform_bounds
+
+    b_xmin, b_ymin, b_xmax, b_ymax = view_bounds
+    lon_min, lat_min, lon_max, lat_max = transform_bounds(
+        dst_crs, "EPSG:4326", b_xmin, b_ymin, b_xmax, b_ymax, densify_pts=21
+    )
+
+    chosen_z = zoom_candidates[-1]
+    for z_cand in zoom_candidates:
+        x0, y0 = _deg2tile(lat_max, lon_min, z_cand)
+        x1, y1 = _deg2tile(lat_min, lon_max, z_cand)
+        n_tiles = (abs(x1 - x0) + 1) * (abs(y1 - y0) + 1)
+        if n_tiles <= max_tiles:
+            chosen_z = z_cand
+            break
+
+    x_min, y_min = _deg2tile(lat_max, lon_min, chosen_z)
+    x_max, y_max = _deg2tile(lat_min, lon_max, chosen_z)
+    if x_min > x_max:
+        x_min, x_max = x_max, x_min
+    if y_min > y_max:
+        y_min, y_max = y_max, y_min
+
+    n_cols_t = x_max - x_min + 1
+    n_rows_t = y_max - y_min + 1
+    mosaic = np.zeros((n_bands, n_rows_t * 256, n_cols_t * 256), dtype=np.uint8)
+
+    tile_coords = [
+        (tx, ty)
+        for ty in range(y_min, y_max + 1)
+        for tx in range(x_min, x_max + 1)
+    ]
+
+    def _fetch_one_tile(coord):
+        tx, ty = coord
+        try:
+            return tx, ty, fetch_tile(chosen_z, tx, ty)
+        except Exception:
+            return tx, ty, None
+
+    # Fetch tiles concurrently across threads for rapid mosaic generation
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(_fetch_one_tile, tile_coords))
+
+    for tx, ty, arr in results:
+        if arr is not None and arr.shape[:2] == (256, 256):
+            r0 = (ty - y_min) * 256
+            c0 = (tx - x_min) * 256
+            mosaic[:, r0 : r0 + 256, c0 : c0 + 256] = np.transpose(arr[:, :, :n_bands], (2, 0, 1))
+
+    origin_shift = 20037508.342789244
+    res_3857 = (2.0 * origin_shift) / (256.0 * (2.0 ** chosen_z))
+    west_3857 = x_min * 256.0 * res_3857 - origin_shift
+    north_3857 = origin_shift - y_min * 256.0 * res_3857
+    src_transform = from_origin(west_3857, north_3857, res_3857, res_3857)
+
+    aspect = (b_ymax - b_ymin) / max(1e-6, (b_xmax - b_xmin))
+    dst_h = max(240, min(1440, int(round(dst_w * aspect))))
+    dst_transform = from_bounds(b_xmin, b_ymin, b_xmax, b_ymax, dst_w, dst_h)
+
+    warped = np.zeros((n_bands, dst_h, dst_w), dtype=np.uint8)
+    for band_idx in range(n_bands):
+        reproject(
+            source=mosaic[band_idx],
+            destination=warped[band_idx],
+            src_transform=src_transform,
+            src_crs="EPSG:3857",
+            dst_transform=dst_transform,
+            dst_crs=dst_crs,
+            resampling=Resampling.bilinear,
+        )
+    return warped
+
+
 def _fetch_google_satellite_basemap_in_memory(
     dst_crs,
     dst_bounds: Tuple[float, float, float, float],
@@ -283,125 +429,23 @@ def _fetch_google_satellite_basemap_in_memory(
     optionally expanding to a `target_aspect` (width/height ratio such as 16/9) for panoramic view,
     reprojects the mosaic in memory to `dst_crs`, and returns `(rgb_hwc_uint8, [xmin, xmax, ymin, ymax])`.
     """
-    import math
-    import concurrent.futures
     from PIL import Image
-    from rasterio.transform import from_origin, from_bounds
-    from rasterio.warp import transform_bounds
+
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+    def _fetch_google_tile(z: int, tx: int, ty: int) -> Optional[np.ndarray]:
+        url = f"https://mt1.google.com/vt/lyrs=s&x={tx}&y={ty}&z={z}"
+        r = requests.get(url, headers=headers, timeout=5)
+        if r.status_code == 200:
+            img = Image.open(io.BytesIO(r.content)).convert("RGB")
+            return np.asarray(img, dtype=np.uint8)
+        return None
 
     try:
-        xmin, ymin, xmax, ymax = dst_bounds
-        w_field = max(10.0, float(xmax - xmin))
-        h_field = max(10.0, float(ymax - ymin))
-
-        pad_x = max(10.0, w_field * pad_frac)
-        pad_y = max(10.0, h_field * pad_frac)
-        b_xmin = xmin - pad_x
-        b_xmax = xmax + pad_x
-        b_ymin = ymin - pad_y
-        b_ymax = ymax + pad_y
-
-        # If a target aspect ratio is specified, symmetrically expand bounds so the view fills the wide frame
-        if target_aspect is not None and target_aspect > 0:
-            cur_w = b_xmax - b_xmin
-            cur_h = b_ymax - b_ymin
-            cur_aspect = cur_w / max(1e-6, cur_h)
-            if cur_aspect < target_aspect:
-                # Field is squarer/narrower than target aspect: expand horizontally
-                desired_w = cur_h * target_aspect
-                diff_x = (desired_w - cur_w) / 2.0
-                b_xmin -= diff_x
-                b_xmax += diff_x
-            elif cur_aspect > target_aspect:
-                # Field is wider than target aspect: expand vertically
-                desired_h = cur_w / target_aspect
-                diff_y = (desired_h - cur_h) / 2.0
-                b_ymin -= diff_y
-                b_ymax += diff_y
-
-        lon_min, lat_min, lon_max, lat_max = transform_bounds(
-            dst_crs, "EPSG:4326", b_xmin, b_ymin, b_xmax, b_ymax, densify_pts=21
+        b_xmin, b_ymin, b_xmax, b_ymax = _expand_view_bounds(dst_bounds, pad_frac, target_aspect)
+        warped = _fetch_xyz_mosaic_in_memory(
+            _fetch_google_tile, dst_crs, (b_xmin, b_ymin, b_xmax, b_ymax), n_bands=3
         )
-
-        def _deg2tile(lat_deg: float, lon_deg: float, zoom: int) -> Tuple[int, int]:
-            lat_rad = math.radians(max(-85.0511, min(85.0511, lat_deg)))
-            n = 2.0 ** zoom
-            xtile = int((lon_deg + 180.0) / 360.0 * n)
-            ytile = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
-            return xtile, ytile
-
-        chosen_z = 17
-        for z_cand in [18, 17, 16, 15, 14]:
-            x0, y0 = _deg2tile(lat_max, lon_min, z_cand)
-            x1, y1 = _deg2tile(lat_min, lon_max, z_cand)
-            n_tiles = (abs(x1 - x0) + 1) * (abs(y1 - y0) + 1)
-            if n_tiles <= 28:
-                chosen_z = z_cand
-                break
-
-        x_min, y_min = _deg2tile(lat_max, lon_min, chosen_z)
-        x_max, y_max = _deg2tile(lat_min, lon_max, chosen_z)
-        if x_min > x_max:
-            x_min, x_max = x_max, x_min
-        if y_min > y_max:
-            y_min, y_max = y_max, y_min
-
-        n_cols_t = x_max - x_min + 1
-        n_rows_t = y_max - y_min + 1
-        mosaic = np.zeros((3, n_rows_t * 256, n_cols_t * 256), dtype=np.uint8)
-
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        tile_coords = [
-            (tx, ty)
-            for ty in range(y_min, y_max + 1)
-            for tx in range(x_min, x_max + 1)
-        ]
-
-        def _fetch_one_tile(coord):
-            tx, ty = coord
-            url = f"https://mt1.google.com/vt/lyrs=s&x={tx}&y={ty}&z={chosen_z}"
-            try:
-                r = requests.get(url, headers=headers, timeout=5)
-                if r.status_code == 200:
-                    img = Image.open(io.BytesIO(r.content)).convert("RGB")
-                    return tx, ty, np.asarray(img, dtype=np.uint8)
-            except Exception:
-                pass
-            return tx, ty, None
-
-        # Fetch tiles concurrently across threads for rapid mosaic generation
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-            results = list(pool.map(_fetch_one_tile, tile_coords))
-
-        for tx, ty, arr in results:
-            if arr is not None:
-                r0 = (ty - y_min) * 256
-                c0 = (tx - x_min) * 256
-                mosaic[:, r0 : r0 + 256, c0 : c0 + 256] = np.transpose(arr, (2, 0, 1))
-
-        origin_shift = 20037508.342789244
-        res_3857 = (2.0 * origin_shift) / (256.0 * (2.0 ** chosen_z))
-        west_3857 = x_min * 256.0 * res_3857 - origin_shift
-        north_3857 = origin_shift - y_min * 256.0 * res_3857
-        src_transform = from_origin(west_3857, north_3857, res_3857, res_3857)
-
-        aspect = (b_ymax - b_ymin) / max(1e-6, (b_xmax - b_xmin))
-        dst_w = 1440
-        dst_h = max(240, min(1440, int(round(dst_w * aspect))))
-        dst_transform = from_bounds(b_xmin, b_ymin, b_xmax, b_ymax, dst_w, dst_h)
-
-        warped = np.zeros((3, dst_h, dst_w), dtype=np.uint8)
-        for band_idx in range(3):
-            reproject(
-                source=mosaic[band_idx],
-                destination=warped[band_idx],
-                src_transform=src_transform,
-                src_crs="EPSG:3857",
-                dst_transform=dst_transform,
-                dst_crs=dst_crs,
-                resampling=Resampling.bilinear,
-            )
-
         rgb_hwc = np.transpose(warped, (1, 2, 0))
         return rgb_hwc, [b_xmin, b_xmax, b_ymin, b_ymax]
     except Exception:
@@ -1039,6 +1083,53 @@ def _planet_request(
     return resp
 
 
+def _extract_item_filename(item: dict) -> str:
+    """Safely extracts the file name from a Planet Orders API result item."""
+    for k in ("name", "path", "filename", "file_name"):
+        val = item.get(k)
+        if val and isinstance(val, str):
+            return Path(val).name
+    loc = item.get("location") or ""
+    if loc and isinstance(loc, str):
+        base_loc = loc.split("?")[0].rstrip("/")
+        cand = Path(base_loc).name
+        if cand and ("." in cand):
+            return cand
+    return ""
+
+
+def _download_planet_file(loc: str, target_path: Path, clean_key: str):
+    """Downloads a file from Planet Orders API results handling S3 signed URLs and Planet API auth."""
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    if "api.planet.com" in loc:
+        resp = _planet_request("GET", loc, api_key=clean_key, stream=True, timeout=180)
+        resp.raise_for_status()
+        with open(target_path, "wb") as f_out:
+            for chunk in resp.iter_content(chunk_size=32768):
+                if chunk:
+                    f_out.write(chunk)
+    else:
+        with requests.get(loc, stream=True, timeout=180) as r_dl:
+            if r_dl.status_code in (401, 403):
+                r_dl.close()
+                r_dl = _planet_request("GET", loc, api_key=clean_key, stream=True, timeout=180)
+            r_dl.raise_for_status()
+            with open(target_path, "wb") as f_out:
+                for chunk in r_dl.iter_content(chunk_size=32768):
+                    if chunk:
+                        f_out.write(chunk)
+
+
+def _unpack_zip_archive(zip_path: Path, extract_dir: Path) -> List[str]:
+    """Unpacks a ZIP archive into extract_dir and returns paths to all valid GeoTIFF rasters."""
+    try:
+        extracted, _ = extract_sr_rasters_from_zip(zip_path, extract_dir)
+        return [str(p) for p in extracted]
+    except Exception as e:
+        print(f"Warning: Failed to unpack ZIP bundle {zip_path.name}: {e}")
+        return []
+
+
 def get_planet_order_status(api_key: str, order_id: str) -> Dict[str, Any]:
     """
     Queries the current status of an order in Planet Orders API v2.
@@ -1063,11 +1154,12 @@ def get_planet_order_status(api_key: str, order_id: str) -> Dict[str, Any]:
 
     data = resp.json()
     state = str(data.get("state", "unknown")).lower()
-    results = data.get("_links", {}).get("results", [])
-    tif_items = [
+    results = data.get("_links", {}).get("results") or data.get("results") or []
+    
+    sr_names = set(select_sr_rasters(_extract_item_filename(item) for item in results))
+    raster_items = [
         item for item in results
-        if Path(item.get("name", "")).name.lower().endswith(".tif")
-        and "udm" not in Path(item.get("name", "")).name.lower()
+        if _extract_item_filename(item) in sr_names or _extract_item_filename(item).lower().endswith(".zip")
     ]
 
     return {
@@ -1076,11 +1168,137 @@ def get_planet_order_status(api_key: str, order_id: str) -> Dict[str, Any]:
         "state": state,
         "created_at": data.get("created_on", ""),
         "last_message": data.get("last_message", ""),
-        "raster_count": len(tif_items),
+        "raster_count": len(raster_items),
         "is_ready": state in ("success", "partial"),
         "is_processing": state in ("queued", "running", "preparing", "starting"),
         "is_failed": state in ("failed", "cancelled"),
     }
+
+
+def _optional_float(value, ndigits: int = 1) -> Optional[float]:
+    """Rounds a numeric Planet property, returning None when it is missing or non-numeric."""
+    try:
+        return None if value is None else round(float(value), ndigits)
+    except (TypeError, ValueError):
+        return None
+
+
+def render_planet_scene_previews(
+    api_key: str,
+    poly_gdf: gpd.GeoDataFrame,
+    scene_ids: List[str],
+    out_dir: Path,
+    max_scenes: int = 12,
+    max_tiles_per_scene: int = 16,
+) -> List[Dict]:
+    """
+    Builds a true-colour, field-cropped preview PNG for each PlanetScope scene by streaming its
+    Planet XYZ tiles (`tiles.planet.com`, visual browse imagery — no Orders / download quota used),
+    then overlaying the field boundary. PNGs are cached in `out_dir/planet_previews/` keyed by
+    scene ID and boundary geometry, so a scene is never fetched twice for the same field.
+
+    Returns one dict per scene: `{"scene_id", "status": "ok" | "no_data" | "error", "png_path", "message"}`.
+    """
+    import hashlib
+    from PIL import Image, ImageDraw
+
+    clean_key = _clean_planet_key(api_key)
+    if not clean_key:
+        raise ValueError("Planet API key cannot be empty. Please enter your API key in Step 3 Option B.")
+
+    poly_gdf_4326 = poly_gdf.to_crs("EPSG:4326")
+    try:
+        utm_crs = poly_gdf_4326.estimate_utm_crs() or "EPSG:32615"
+    except Exception:
+        utm_crs = "EPSG:32615"
+    geom_utm = unary_union(poly_gdf_4326.to_crs(utm_crs).geometry.values)
+    view_bounds = _expand_view_bounds(geom_utm.bounds, pad_frac=0.20, target_aspect=4.0 / 3.0)
+    b_xmin, b_ymin, b_xmax, b_ymax = view_bounds
+
+    boundary_key = hashlib.md5(unary_union(poly_gdf_4326.geometry.values).wkb).hexdigest()[:10]
+    preview_dir = Path(out_dir) / "planet_previews"
+    preview_dir.mkdir(parents=True, exist_ok=True)
+
+    session = requests.Session()
+    previews: List[Dict] = []
+
+    for scene_id in list(scene_ids)[:max_scenes]:
+        png_path = preview_dir / f"{scene_id}_{boundary_key}.png"
+        if png_path.exists():
+            previews.append({"scene_id": scene_id, "status": "ok", "png_path": str(png_path), "message": ""})
+            continue
+
+        status_codes: List[int] = []
+
+        def _fetch_planet_tile(z: int, tx: int, ty: int, _sid: str = scene_id) -> Optional[np.ndarray]:
+            url = PLANET_SCENE_TILES_URL.format(scene_id=_sid, z=z, x=tx, y=ty)
+            # The key travels only in this server-side request; it never reaches the browser
+            try:
+                r = session.get(url, params={"api_key": clean_key}, timeout=15)
+            except requests.RequestException:
+                status_codes.append(0)
+                return None
+            status_codes.append(r.status_code)
+            if r.status_code == 200 and r.content:
+                img = Image.open(io.BytesIO(r.content)).convert("RGBA")
+                return np.asarray(img, dtype=np.uint8)
+            return None
+
+        try:
+            warped = _fetch_xyz_mosaic_in_memory(
+                _fetch_planet_tile,
+                utm_crs,
+                view_bounds,
+                n_bands=4,
+                zoom_candidates=(16, 15, 14, 13, 12),
+                max_tiles=max_tiles_per_scene,
+                dst_w=640,
+            )
+        except Exception as exc:
+            previews.append({"scene_id": scene_id, "status": "error", "png_path": "", "message": type(exc).__name__})
+            continue
+
+        if status_codes and all(code in (401, 403) for code in status_codes):
+            raise PermissionError(
+                "Planet refused the preview tile requests (HTTP 401/403). "
+                "Please verify that your Planet API key is valid and has PlanetScope access."
+            )
+
+        alpha = warped[3].astype(np.float32) / 255.0
+        if float(alpha.max()) <= 0.0:
+            previews.append({
+                "scene_id": scene_id,
+                "status": "no_data",
+                "png_path": "",
+                # Planet answers 404 both for invalid keys and for scenes the key cannot access
+                "message": "Planet returned no imagery for this scene over your field "
+                           "(the scene may not be accessible with this API key).",
+            })
+            continue
+
+        # Composite RGB over a dark navy backdrop so areas outside the scene footprint read as no-data
+        backdrop = np.array([19, 41, 75], dtype=np.float32).reshape(3, 1, 1)
+        rgb = warped[:3].astype(np.float32) * alpha + backdrop * (1.0 - alpha)
+        img = Image.fromarray(np.transpose(rgb.clip(0, 255).astype(np.uint8), (1, 2, 0)), mode="RGB")
+
+        # Overlay the field boundary (white halo + Illini orange stroke) in pixel space
+        img_w, img_h = img.size
+        sx = img_w / max(1e-6, b_xmax - b_xmin)
+        sy = img_h / max(1e-6, b_ymax - b_ymin)
+        draw = ImageDraw.Draw(img)
+        polys = [geom_utm] if geom_utm.geom_type == "Polygon" else list(getattr(geom_utm, "geoms", []))
+        for p in polys:
+            if p.geom_type != "Polygon":
+                continue
+            for ring in [p.exterior, *p.interiors]:
+                pts = [((x - b_xmin) * sx, (b_ymax - y) * sy) for x, y in ring.coords]
+                draw.line(pts, fill=(255, 255, 255), width=4, joint="curve")
+                draw.line(pts, fill=ILLINI_ORANGE, width=2, joint="curve")
+
+        img.save(png_path, format="PNG", optimize=True)
+        previews.append({"scene_id": scene_id, "status": "ok", "png_path": str(png_path), "message": ""})
+
+    return previews
 
 
 def search_planet_catalog_for_window(
@@ -1108,7 +1326,21 @@ def search_planet_catalog_for_window(
     any combination of dates to download.
     """
     clean_key = _clean_planet_key(api_key)
-    poly_geojson = poly_gdf.to_crs("EPSG:4326").geometry.iloc[0].__geo_interface__
+    poly_gdf_4326 = poly_gdf.to_crs("EPSG:4326")
+    poly_geojson = poly_gdf_4326.geometry.iloc[0].__geo_interface__
+    field_geom_4326 = unary_union(poly_gdf_4326.geometry.values)
+    if not field_geom_4326.is_valid:
+        field_geom_4326 = shapely.make_valid(field_geom_4326)
+
+    try:
+        utm_crs = poly_gdf.estimate_utm_crs()
+        field_geom_utm = unary_union(poly_gdf.to_crs(utm_crs).geometry.values)
+        if not field_geom_utm.is_valid:
+            field_geom_utm = shapely.make_valid(field_geom_utm)
+        field_area_ref = float(field_geom_utm.area)
+    except Exception:
+        utm_crs = None
+        field_area_ref = float(field_geom_4326.area)
 
     # Resolve season year
     year = None
@@ -1182,13 +1414,50 @@ def search_planet_catalog_for_window(
             acq_dt = datetime.strptime(acq_str, "%Y-%m-%d")
         except ValueError:
             continue
+
+        geom_dict = f.get("geometry")
+        coverage_pct = 0.0
+        if geom_dict:
+            try:
+                scene_geom = shape(geom_dict)
+                if not scene_geom.is_valid:
+                    scene_geom = shapely.make_valid(scene_geom)
+
+                if scene_geom.contains(field_geom_4326):
+                    coverage_pct = 100.0
+                else:
+                    inter = field_geom_4326.intersection(scene_geom)
+                    if inter.is_empty:
+                        coverage_pct = 0.0
+                    else:
+                        if utm_crs is not None:
+                            inter_utm = gpd.GeoSeries([inter], crs="EPSG:4326").to_crs(utm_crs).iloc[0]
+                            inter_area = float(inter_utm.area)
+                        else:
+                            inter_area = float(inter.area)
+
+                        if field_area_ref > 0:
+                            ratio = (inter_area / field_area_ref) * 100.0
+                            coverage_pct = 100.0 if ratio >= 99.5 else round(max(0.0, ratio), 1)
+                        else:
+                            coverage_pct = 0.0
+            except Exception:
+                coverage_pct = 0.0
+
         scenes.append({
             "scene_id": f["id"],
             "date_str": acq_dt.strftime("%Y%m%d"),
             "date_iso": acq_str,
             "date_dt": acq_dt,
+            "coverage_pct": coverage_pct,
             "cloud_cover_pct": round(float(props.get("cloud_cover", 0.0)) * 100.0, 1),
             "sun_elevation": round(float(props.get("sun_elevation", 0.0)), 1),
+            # Scene-level usable-pixel metrics (from Planet's UDM2); may be missing on older captures
+            "clear_percent": _optional_float(props.get("clear_percent")),
+            "visible_percent": _optional_float(props.get("visible_percent")),
+            "view_angle": _optional_float(props.get("view_angle")),
+            "quality_category": props.get("quality_category", ""),
+            "ground_control": bool(props.get("ground_control", True)),
             "instrument": props.get("instrument", "PSB.SD"),
             "suggestion": "",
             "is_suggested": False,
@@ -1197,8 +1466,11 @@ def search_planet_catalog_for_window(
     if not scenes:
         raise ValueError(f"No valid PlanetScope scenes parsed in the window {start_iso} to {end_iso}.")
 
-    # Deduplicate by calendar day (keep scene with lowest cloud cover per day)
-    scenes_df = pd.DataFrame(scenes).sort_values(["date_str", "cloud_cover_pct"]).drop_duplicates("date_str", keep="first")
+    # Deduplicate by calendar day: prioritize full field coverage first, then lowest cloud cover
+    scenes_df = pd.DataFrame(scenes).sort_values(
+        ["date_str", "coverage_pct", "cloud_cover_pct"],
+        ascending=[True, False, True]
+    ).drop_duplicates("date_str", keep="first")
     scenes_df = scenes_df.sort_values("date_dt").reset_index(drop=True)
 
     peak_scene = None
@@ -1208,16 +1480,20 @@ def search_planet_catalog_for_window(
 
     # Highlight suggested captures based on the continuous Sentinel-2 NDVI trajectory
     if peak_date is not None and target_date is not None:
+        # Require full field coverage (>= 95%) for suggestions so partial captures are never auto-suggested
+        full_cov_mask = scenes_df["coverage_pct"] >= 95.0
+        cand_df = scenes_df[full_cov_mask].copy() if full_cov_mask.any() else scenes_df.copy()
+
         # 1. Early baseline mask (closest to peak canopy t_peak)
-        scenes_df["diff_peak"] = (scenes_df["date_dt"] - peak_date).abs()
-        idx_peak = scenes_df.sort_values(["diff_peak", "cloud_cover_pct"]).index[0]
+        cand_df["diff_peak"] = (cand_df["date_dt"] - peak_date).abs()
+        idx_peak = cand_df.sort_values(["diff_peak", "cloud_cover_pct"]).index[0]
         scenes_df.loc[idx_peak, "suggestion"] = "Suggested (early baseline, t_peak)"
         scenes_df.loc[idx_peak, "is_suggested"] = True
         peak_scene = scenes_df.loc[idx_peak].to_dict()
 
         # Remaining candidates for target dates
-        rem_mask = scenes_df.index != idx_peak
-        rem_df = scenes_df[rem_mask].copy()
+        rem_mask = cand_df.index != idx_peak
+        rem_df = cand_df[rem_mask].copy()
 
         if not rem_df.empty:
             # 2. Optimal target (closest to optimal scouting date t_0)
@@ -1230,7 +1506,7 @@ def search_planet_catalog_for_window(
 
             # 3. Pre-target (-5 days before t_0)
             b_target = before_date or (target_date - timedelta(days=5))
-            before_cands = scenes_df[rem_mask & (scenes_df["date_dt"] < t0_dt)].copy()
+            before_cands = rem_df[rem_df["date_dt"] < t0_dt].copy()
             if not before_cands.empty:
                 before_cands["diff_before"] = (before_cands["date_dt"] - b_target).abs()
                 idx_before = before_cands.sort_values(["diff_before", "cloud_cover_pct"]).index[0]
@@ -1240,7 +1516,7 @@ def search_planet_catalog_for_window(
 
             # 4. Post-target (+5 days after t_0)
             a_target = after_date or (target_date + timedelta(days=5))
-            after_cands = scenes_df[rem_mask & (scenes_df["date_dt"] > t0_dt)].copy()
+            after_cands = rem_df[rem_df["date_dt"] > t0_dt].copy()
             if not after_cands.empty:
                 after_cands["diff_after"] = (after_cands["date_dt"] - a_target).abs()
                 idx_after = after_cands.sort_values(["diff_after", "cloud_cover_pct"]).index[0]
@@ -1319,37 +1595,64 @@ def download_planet_order_by_id(
             )
 
         if state in ("success", "partial"):
-            results = data.get("_links", {}).get("results", [])
-            tif_items = [
-                item for item in results
-                if Path(item.get("name", "")).name.lower().endswith(".tif")
-                and "udm" not in Path(item.get("name", "")).name.lower()
-                and ("sr" in Path(item.get("name", "")).name.lower() or "analytic" in Path(item.get("name", "")).name.lower())
-            ]
-            if not tif_items:
-                tif_items = [
-                    item for item in results
-                    if Path(item.get("name", "")).name.lower().endswith(".tif")
-                    and "udm" not in Path(item.get("name", "")).name.lower()
-                ]
+            results = data.get("_links", {}).get("results") or data.get("results") or []
+            
+            sr_names = set(select_sr_rasters(_extract_item_filename(item) for item in results))
+            tif_items = [item for item in results if _extract_item_filename(item) in sr_names]
 
-            if not tif_items:
-                raise ValueError(f"Planet Order '{clean_order_id}' completed with state '{state}', but no clipped GeoTIFF rasters were found in results.")
+            zip_items = [
+                item for item in results
+                if _extract_item_filename(item).lower().endswith(".zip")
+            ]
+
+            if not tif_items and not zip_items:
+                all_names = [_extract_item_filename(item) for item in results if _extract_item_filename(item)]
+                if not results:
+                    raise ValueError(
+                        f"Planet Order '{clean_order_id}' completed with state '{state}', but returned 0 download files. "
+                        "This typically occurs if the order's temporary download links have expired (Planet download URLs expire after 24–48 hours) "
+                        "or if assets were delivered directly to cloud storage. "
+                        "Please place a new clip order in Step 3 (Search & Order), or upload the GeoTIFFs downloaded from Planet Explorer in Option A."
+                    )
+                else:
+                    raise ValueError(
+                        f"Planet Order '{clean_order_id}' completed with state '{state}', but no clipped GeoTIFF rasters or ZIP archives were found in results. "
+                        f"Items found in order: {all_names}. "
+                        "If you already downloaded this order from Planet Explorer, please upload the GeoTIFFs directly in Option A above."
+                    )
 
             downloaded_tifs = []
-            total_items = len(tif_items)
-            for idx, item in enumerate(tif_items):
-                name = Path(item.get("name", "")).name
-                loc = item["location"]
-                target_path = out_dir / name
-                if status_callback:
-                    status_callback(f"Downloading clipped GeoTIFF ({idx + 1}/{total_items}): {name}...")
-                with requests.get(loc, stream=True, timeout=180) as r_dl:
-                    r_dl.raise_for_status()
-                    with open(target_path, "wb") as f_out:
-                        for chunk in r_dl.iter_content(chunk_size=16384):
-                            f_out.write(chunk)
-                downloaded_tifs.append(str(target_path))
+            if tif_items:
+                total_tifs = len(tif_items)
+                for idx, item in enumerate(tif_items):
+                    name = _extract_item_filename(item) or f"planet_scene_{idx + 1}.tif"
+                    loc = item["location"]
+                    target_path = out_dir / name
+                    if status_callback:
+                        status_callback(f"Downloading clipped GeoTIFF ({idx + 1}/{total_tifs}): {name}...")
+                    _download_planet_file(loc, target_path, clean_key)
+                    downloaded_tifs.append(str(target_path))
+
+            if zip_items:
+                total_zips = len(zip_items)
+                for idx, item in enumerate(zip_items):
+                    zname = _extract_item_filename(item) or f"order_{clean_order_id}_{idx + 1}.zip"
+                    loc = item["location"]
+                    zip_path = out_dir / zname
+                    if status_callback:
+                        status_callback(f"Downloading order ZIP bundle ({idx + 1}/{total_zips}): {zname}...")
+                    _download_planet_file(loc, zip_path, clean_key)
+                    if status_callback:
+                        status_callback(f"Unpacking ZIP bundle {zname}...")
+                    unpacked = _unpack_zip_archive(zip_path, out_dir)
+                    downloaded_tifs.extend(unpacked)
+
+            if not downloaded_tifs:
+                raise ValueError(
+                    f"Planet Order '{clean_order_id}' completed with state '{state}', but no valid .tif rasters were found or extracted."
+                )
+
+            downloaded_tifs = list(dict.fromkeys(downloaded_tifs))
 
             if status_callback:
                 status_callback(f"Downloaded {len(downloaded_tifs)} clipped PlanetScope GeoTIFF(s) successfully!")
@@ -1391,7 +1694,7 @@ def submit_and_download_planet_clip_order(
     max_wait_minutes: int = 30
 ) -> Dict[str, Any]:
     """
-    Submits a polygon-clipped order to Planet Orders API v2 for the selected scene IDs,
+    Submits a polygon-clipped, Sentinel-2-harmonized order to Planet Orders API v2 for the selected scene IDs,
     records the Order ID, polls until completion, and downloads the clipped GeoTIFFs to
     routine_inspection/raw_satellite/<field_id>/<season>/.
     """
@@ -1410,10 +1713,17 @@ def submit_and_download_planet_clip_order(
                 "product_bundle": "analytic_8b_sr_udm2"
             }
         ],
+        # Clip to the field, then harmonize to Sentinel-2 so the delivered rasters match the
+        # *_AnalyticMS_SR_8b_harmonized_clip.tif files produced by Planet Explorer orders.
         "tools": [
             {
                 "clip": {
                     "aoi": poly_geojson
+                }
+            },
+            {
+                "harmonize": {
+                    "target_sensor": "Sentinel-2"
                 }
             }
         ]
@@ -1453,8 +1763,13 @@ def submit_and_download_planet_clip_order(
 
 def parse_date_from_filename(filename: str) -> Optional[str]:
     """Extracts an 8-digit YYYYMMDD date string from a PlanetScope filename."""
-    match = re.search(r"(202[0-9][01][0-9][0-3][0-9])", filename)
-    return match.group(1) if match else None
+    m1 = re.search(r"(20[1-3][0-9][01][0-9][0-3][0-9])", filename)
+    if m1:
+        return m1.group(1)
+    m2 = re.search(r"(20[1-3][0-9])[-_]([01][0-9])[-_]([0-3][0-9])", filename)
+    if m2:
+        return f"{m2.group(1)}{m2.group(2)}{m2.group(3)}"
+    return None
 
 
 def find_local_field_tifs(field_id: str, season: str) -> Dict[str, Path]:
@@ -1478,11 +1793,9 @@ def find_local_field_tifs(field_id: str, season: str) -> Dict[str, Path]:
     found: Dict[str, Path] = {}
     for d in candidate_dirs:
         if d.exists():
-            tifs = [
-                f for f in d.rglob("*.tif*")
-                if "udm" not in f.name.lower() and ("sr" in f.name.lower() or "analytic" in f.name.lower())
-            ]
-            for tif in sorted(tifs):
+            tifs = [f for f in d.rglob("*.tif*") if f.is_file()]
+            use_tifs = [Path(p) for p in select_sr_rasters(str(f) for f in sorted(tifs))]
+            for tif in use_tifs:
                 d_str = parse_date_from_filename(tif.name)
                 if d_str and d_str.startswith(str(season)):
                     found[d_str] = tif
@@ -1652,6 +1965,12 @@ def run_multi_date_rcr_classification(
 
     # Step A: Early-season canopy mask (mean - mask_sigma * SD)
     early_img, early_meta = _clip_raster_to_polygon(early_tif_path, poly_gdf)
+    if early_img.shape[0] < 8:
+        raise ValueError(
+            f"The early baseline raster '{early_tif_path.name}' has only {early_img.shape[0]} band(s). "
+            "The Red Crown Rot model requires 8-band PlanetScope SuperDove Surface Reflectance imagery "
+            "(analytic_8b_sr_udm2)."
+        )
     early_red = early_img[5].astype("float32") / 10000.0  # Band 6 (Red)
     early_nir = early_img[7].astype("float32") / 10000.0  # Band 8 (NIR)
 
@@ -1669,8 +1988,17 @@ def run_multi_date_rcr_classification(
     date_results = []
     exported_files = []
 
+    # Process (and therefore report/plot) captures chronologically, regardless of selection order (YYYYMMDD sorts lexically)
+    target_captures = sorted(target_captures, key=lambda c: str(c[1]))
+
     for role_label, target_date_str, target_tif_path in target_captures:
         target_img, out_meta = _clip_raster_to_polygon(target_tif_path, poly_gdf)
+        if target_img.shape[0] < 8:
+            raise ValueError(
+                f"The classification raster '{target_tif_path.name}' has only {target_img.shape[0]} band(s). "
+                "The Red Crown Rot model requires 8-band PlanetScope SuperDove Surface Reflectance imagery "
+                "(analytic_8b_sr_udm2)."
+            )
         h, w = out_meta["height"], out_meta["width"]
 
         aligned_canopy_mask = np.zeros((h, w), dtype=np.uint8)
@@ -1857,10 +2185,25 @@ def plot_multi_date_comparison_grid(run_res: Dict, field_id: str, season: str) -
     from matplotlib.lines import Line2D
     from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-    results = run_res["date_results"]
+    results = sorted(run_res["date_results"], key=lambda r: str(r.get("capture_date", "")))
     n_cols = len(results)
-    fig_w = max(6.4, 5.2 * n_cols)
-    fig = Figure(figsize=(fig_w, 8.5), dpi=500, facecolor="#FFFFFF")
+
+    # Size each map cell to the field's own (padded) aspect ratio so the equal-aspect maps fill their
+    # cells instead of being letterboxed inside a fixed-size figure (wide fields -> vertical gaps,
+    # tall fields -> horizontal gaps).
+    h_over_w = 0.75
+    if results[0].get("_bounds") is not None:
+        vx0, vy0, vx1, vy1 = _expand_view_bounds(results[0]["_bounds"], pad_frac=0.10)
+        h_over_w = (vy1 - vy0) / max(1e-6, vx1 - vx0)
+    h_over_w = min(2.8, max(0.35, h_over_w))
+    map_long_in = 4.4
+    map_w = map_long_in if h_over_w <= 1.0 else map_long_in / h_over_w
+    map_h = map_w * h_over_w
+    col_w = max(3.4, map_w + 0.75)  # + colorbar & tick labels; floor keeps titles/legend from clipping
+    header_in = 0.8
+    fig_w = max(6.4, col_w * n_cols)
+    fig_h = header_in + (0.35 + map_h) + (0.55 + map_h + 0.4)  # row titles, 2-line title + legend
+    fig = Figure(figsize=(fig_w, fig_h), dpi=500, facecolor="#FFFFFF")
     axes = fig.subplots(2, n_cols, squeeze=False)
 
     # Transparent NaN background so the Google Satellite basemap shows clearly outside the canopy mask
@@ -2013,17 +2356,17 @@ def plot_multi_date_comparison_grid(run_res: Dict, field_id: str, season: str) -
     sigma_val = float(results[0].get("mask_sigma_used", run_res.get("mask_sigma", 3.0)))
 
     fig.text(
-        0.03, 0.955,
+        0.03, 1.0 - 0.38 / fig_h,
         f"Red crown rot (RCR) spatial assessment - Field {field_id} ({season})",
         fontsize=10.5, fontweight="600", color=ILLINI_BLUE
     )
     fig.text(
-        0.03, 0.924,
+        0.03, 1.0 - 0.65 / fig_h,
         f"Early canopy mask baseline: {early_iso} (mean - {sigma_val:g} SD)   |   Classification threshold: t = {thresh_val:.2f}   |   Model: RCRC v3.1",
         fontsize=8.3, color="#4A5B75"
     )
 
-    fig.tight_layout(rect=[0.01, 0.03, 0.99, 0.89])
+    fig.tight_layout(rect=[0.01, 0.1 / fig_h, 0.99, 1.0 - header_in / fig_h], w_pad=1.2, h_pad=0.8)
     return fig
 
 

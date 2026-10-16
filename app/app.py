@@ -1,7 +1,7 @@
 """
 app.py
 ======
-Red crown rot scouting
+RCR Scout — Satellite mapping of red crown rot in soybean
 Smart Plant Pathology Lab — University of Illinois Urbana-Champaign
 
 Architecture Note (Windows Conda Stability):
@@ -15,7 +15,9 @@ Architecture Note (Windows Conda Stability):
 
 from __future__ import annotations
 
+import calendar
 import hashlib
+import html
 import json
 import os
 import re
@@ -24,15 +26,22 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
+from PIL import Image
 import streamlit as st
+import streamlit.components.v1 as components
+
+from planet_files import describe_planet_file, extract_sr_rasters_from_zip, is_planet_sr_raster, select_sr_rasters
 
 # ==============================================================================
 # 1. PATHS, CONSTANTS & SUBPROCESS WORKER RUNNER
 # ==============================================================================
+
+APP_VERSION = "1.1.0"  # keep in sync with CHANGELOG.md and the git release tag
 
 APP_DIR = Path(__file__).resolve().parent
 STANDALONE_ROOT = APP_DIR.parent
@@ -90,6 +99,7 @@ _setup_cloud_earth_engine_credentials()
 DEFAULT_GEE_PROJECT = _get_default_gee_project()
 OPTIMAL_THRESHOLD = 0.48
 TARGET_DROP_RATIO = 0.80
+MAX_PLANET_PREVIEWS_PER_CLICK = 12  # caps Planet tile streaming per "Preview" click (~4-16 tiles per scene)
 
 
 def get_session_workdir() -> Path:
@@ -97,6 +107,74 @@ def get_session_workdir() -> Path:
     if "session_workdir" not in st.session_state or not Path(st.session_state["session_workdir"]).exists():
         st.session_state["session_workdir"] = tempfile.mkdtemp(prefix="rcr_session_")
     return Path(st.session_state["session_workdir"])
+
+
+# ------------------------------------------------------------------------------
+# Linked accounts store (GEE project / credentials and Planet API key)
+# ------------------------------------------------------------------------------
+# Saved in the user's home folder (outside the repo / OneDrive sync), so linked
+# accounts survive app restarts. Disabled on shared cloud hosts, where a file on
+# the server would be visible to every visitor of the app.
+
+ACCOUNTS_STORE_PATH = Path.home() / ".rcr_scout" / "linked_accounts.json"
+
+
+def _is_shared_cloud_host() -> bool:
+    if os.environ.get("RCR_DISABLE_ACCOUNT_STORE", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    # Streamlit Community Cloud mounts apps under /mount/src
+    return Path("/mount/src").exists() or bool(os.environ.get("STREAMLIT_SHARING_MODE"))
+
+
+ACCOUNT_STORE_ENABLED = not _is_shared_cloud_host()
+
+
+def load_linked_accounts() -> Dict[str, str]:
+    if not ACCOUNT_STORE_ENABLED or not ACCOUNTS_STORE_PATH.exists():
+        return {}
+    try:
+        data = json.loads(ACCOUNTS_STORE_PATH.read_text(encoding="utf-8"))
+        return {k: str(v) for k, v in data.items() if isinstance(v, str)} if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def update_linked_accounts(**changes: Optional[str]) -> None:
+    """Sets (str value) or removes (None / empty value) entries in the local store."""
+    if not ACCOUNT_STORE_ENABLED:
+        return
+    data = load_linked_accounts()
+    for k, v in changes.items():
+        if v:
+            data[k] = v
+        else:
+            data.pop(k, None)
+    try:
+        ACCOUNTS_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if data:
+            ACCOUNTS_STORE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            try:
+                os.chmod(ACCOUNTS_STORE_PATH, 0o600)
+            except Exception:
+                pass
+        elif ACCOUNTS_STORE_PATH.exists():
+            ACCOUNTS_STORE_PATH.unlink()
+    except Exception as exc:
+        st.warning(f"Could not save linked accounts to {ACCOUNTS_STORE_PATH}: {exc}")
+
+
+def describe_ee_credentials(cred: str) -> str:
+    """Short, non-secret label for a GEE credential string."""
+    try:
+        data = json.loads(cred)
+        if isinstance(data, dict):
+            if data.get("client_email"):
+                return f"Service account `{data['client_email']}`"
+            if data.get("refresh_token"):
+                return "Earth Engine user token"
+    except Exception:
+        pass
+    return "Custom Earth Engine credentials"
 
 
 def get_library_boundary_files() -> Dict[str, Path]:
@@ -220,8 +298,13 @@ def run_worker(payload: Dict) -> Dict:
 
 
 def parse_date_from_filename(filename: str) -> Optional[str]:
-    match = re.search(r"(202[0-9][01][0-9][0-3][0-9])", filename)
-    return match.group(1) if match else None
+    m1 = re.search(r"(20[1-3][0-9][01][0-9][0-3][0-9])", filename)
+    if m1:
+        return m1.group(1)
+    m2 = re.search(r"(20[1-3][0-9])[-_]([01][0-9])[-_]([0-3][0-9])", filename)
+    if m2:
+        return f"{m2.group(1)}{m2.group(2)}{m2.group(3)}"
+    return None
 
 
 def format_yyyymmdd_iso(d_str: str) -> str:
@@ -280,9 +363,26 @@ def render_crisp_figure(
 # 2. PAGE CONFIGURATION & GOOGLE MATERIAL DESIGN + UIUC THEME
 # ==============================================================================
 
+FAVICON_PATH = APP_DIR / "assets" / "app_icon.png"
+fav_icon = Image.open(FAVICON_PATH) if FAVICON_PATH.exists() else "🛰️"
+
+
+def app_icon_html(size_px: int, extra_style: str = "") -> str:
+    """Returns an inline <img> tag with the app icon (empty string if missing)."""
+    if not FAVICON_PATH.exists():
+        return ""
+    import base64
+
+    b64 = base64.b64encode(FAVICON_PATH.read_bytes()).decode("ascii")
+    return (
+        f'<img src="data:image/png;base64,{b64}" alt="RCR Scout icon" '
+        f'style="width:{size_px}px; height:{size_px}px; flex-shrink:0; {extra_style}" />'
+    )
+
+
 st.set_page_config(
-    page_title="Red crown rot scouting",
-    page_icon="🛰️",
+    page_title="RCR Scout",
+    page_icon=fav_icon,
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -351,8 +451,15 @@ st.markdown(
         color: #FFFFFF;
     }
 
+    .md-hero-tagline {
+        font-size: 1.08rem;
+        font-weight: 500;
+        color: #FFFFFF;
+        margin: 0 0 0.45rem 0;
+    }
+
     .md-hero-subtitle {
-        font-size: 0.96rem;
+        font-size: 0.88rem;
         font-weight: 400;
         color: #E2E8F0;
         margin: 0;
@@ -576,10 +683,11 @@ st.markdown(
 
 # Material Hero Header (Solid Illini Blue Fill)
 st.markdown(
-    """
+    f"""
     <div class="md-hero-card">
-        <div>
-            <div class="md-hero-title">Red crown rot scouting</div>
+        <div style="flex-basis:100%;">
+            <div class="md-hero-title">RCR Scout</div>
+            <div class="md-hero-tagline">Satellite mapping of red crown rot in soybean</div>
             <p class="md-hero-subtitle">
                 Upload field boundary &rarr; Select soybean season &amp; Sentinel-2 trajectory &rarr;
                 Stage PlanetScope imagery &rarr; Generate RCR probability &amp; classification maps
@@ -597,6 +705,7 @@ st.markdown(
                 📧 <b>Dr. Bruno D. Pugliese:</b> <a href="mailto:brunodp@illinois.edu">brunodp@illinois.edu</a>
             </div>
         </div>
+        {app_icon_html(120, "margin-left:auto; align-self:flex-end;")}
     </div>
     """,
     unsafe_allow_html=True,
@@ -607,18 +716,35 @@ for key, default in [
     ("poly_sig", ""),
     ("pheno_res", None),
     ("planet_search_res", None),
+    ("planet_scene_previews", {}),
     ("api_downloaded_files", []),
     ("run_res", None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
+# Restore linked accounts saved on this computer (once per browser session)
+if "linked_accounts_loaded" not in st.session_state:
+    _saved_accounts = load_linked_accounts()
+    if _saved_accounts.get("gee_project"):
+        st.session_state["gee_project"] = _saved_accounts["gee_project"]
+    if _saved_accounts.get("ee_credentials"):
+        st.session_state["custom_ee_credentials"] = _saved_accounts["ee_credentials"]
+        st.session_state["custom_ee_saved"] = True
+    if _saved_accounts.get("planet_api_key"):
+        st.session_state["planet_api_key"] = _saved_accounts["planet_api_key"]
+        st.session_state["planet_key_saved"] = True
+    st.session_state["linked_accounts_loaded"] = True
+
 with st.sidebar:
     st.markdown(
-        """
-        <div style="background-color:#13294B; color:white; padding:0.9rem 1rem; border-radius:10px; border-bottom:4px solid #FF5F05; margin-bottom:1rem;">
-            <div style="font-weight:700; font-size:1.0rem;">Smart Plant Pathology Lab</div>
-            <div style="font-size:0.8rem; color:#CBD5E1;">University of Illinois Urbana-Champaign</div>
+        f"""
+        <div style="background-color:#13294B; color:white; padding:0.9rem 1rem; border-radius:10px; border-bottom:4px solid #FF5F05; margin-bottom:1rem; display:flex; align-items:center; gap:0.75rem;">
+            <div>
+                <div style="font-weight:700; font-size:1.0rem;">Smart Plant Pathology Lab</div>
+                <div style="font-size:0.8rem; color:#CBD5E1;">University of Illinois Urbana-Champaign</div>
+            </div>
+            {app_icon_html(56, "margin-left:auto; align-self:flex-end;")}
         </div>
         """,
         unsafe_allow_html=True,
@@ -629,6 +755,8 @@ with st.sidebar:
         placeholder="e.g. ee-yourusername or gcp-project-id",
         help="Required for Step 2 Sentinel-2 phenology curve. Enter your personal GEE Project ID (e.g. 'ee-username'). Can be left blank if you already configured a default project via 'earthengine set_project' or if you skip Step 2.",
     )
+    if "gee_project" in st.session_state and gee_project_raw.strip() != st.session_state["gee_project"]:
+        update_linked_accounts(gee_project=gee_project_raw.strip())
     st.session_state["gee_project"] = gee_project_raw.strip()
     gee_project = st.session_state["gee_project"]
 
@@ -678,32 +806,63 @@ with st.sidebar:
                 """
             )
 
-        custom_cred_file = st.file_uploader(
-            "Upload Service Account key (.json):",
-            type=["json"],
-            help="Upload a Google Cloud Service Account JSON key with Earth Engine permissions.",
-            key="custom_ee_file",
-        )
-        custom_cred_text = st.text_area(
-            "Or paste credentials JSON / Token:",
-            value=st.session_state.get("custom_ee_credentials", ""),
-            placeholder='{"redirect_uri": ...} or {"type": "service_account", ...}',
-            help="Paste your Earth Engine token or service account JSON string here.",
-            key="custom_ee_text",
-            height=90,
-        )
-        resolved_custom_cred = ""
-        if custom_cred_file is not None:
-            try:
-                resolved_custom_cred = custom_cred_file.getvalue().decode("utf-8")
-            except Exception:
-                pass
-        elif custom_cred_text.strip():
-            resolved_custom_cred = custom_cred_text.strip()
+        linked_ee_cred = st.session_state.get("custom_ee_credentials", "")
+        if linked_ee_cred and not st.session_state.get("ee_cred_editing"):
+            saved_note = "saved on this computer" if st.session_state.get("custom_ee_saved") else "this session only"
+            st.success(f"✅ Linked: {describe_ee_credentials(linked_ee_cred)} ({saved_note})")
+            ee_b1, ee_b2 = st.columns(2)
+            if ee_b1.button("🔄 Change", key="ee_cred_change_btn", use_container_width=True):
+                st.session_state["ee_cred_editing"] = True
+                st.rerun()
+            if ee_b2.button("🗑️ Unlink", key="ee_cred_unlink_btn", use_container_width=True):
+                st.session_state["custom_ee_credentials"] = ""
+                st.session_state["custom_ee_saved"] = False
+                update_linked_accounts(ee_credentials=None)
+                st.rerun()
+        else:
+            # Versioned widget keys so a previous upload doesn't auto-fill the form after "Change"
+            ee_form_ver = st.session_state.get("ee_cred_form_ver", 0)
+            custom_cred_file = st.file_uploader(
+                "Upload Service Account key (.json):",
+                type=["json"],
+                help="Upload a Google Cloud Service Account JSON key with Earth Engine permissions.",
+                key=f"custom_ee_file_{ee_form_ver}",
+            )
+            custom_cred_text = st.text_area(
+                "Or paste credentials JSON / Token:",
+                placeholder='{"redirect_uri": ...} or {"type": "service_account", ...}',
+                help="Paste your Earth Engine token or service account JSON string here.",
+                key=f"custom_ee_text_{ee_form_ver}",
+                height=90,
+            )
+            remember_ee = st.checkbox(
+                "Remember on this computer",
+                value=ACCOUNT_STORE_ENABLED,
+                disabled=not ACCOUNT_STORE_ENABLED,
+                key=f"custom_ee_remember_{ee_form_ver}",
+                help=f"Saves the credentials to {ACCOUNTS_STORE_PATH} so you don't need to link them again."
+                if ACCOUNT_STORE_ENABLED
+                else "Not available on the shared web version of the platform.",
+            )
+            resolved_custom_cred = ""
+            if custom_cred_file is not None:
+                try:
+                    resolved_custom_cred = custom_cred_file.getvalue().decode("utf-8")
+                except Exception:
+                    pass
+            elif custom_cred_text.strip():
+                resolved_custom_cred = custom_cred_text.strip()
 
-        if resolved_custom_cred:
-            st.session_state["custom_ee_credentials"] = resolved_custom_cred
-            st.caption("✅ Custom Earth Engine credentials loaded for this session.")
+            if resolved_custom_cred:
+                st.session_state["custom_ee_credentials"] = resolved_custom_cred
+                st.session_state["custom_ee_saved"] = bool(remember_ee and ACCOUNT_STORE_ENABLED)
+                update_linked_accounts(ee_credentials=resolved_custom_cred if remember_ee else None)
+                st.session_state["ee_cred_editing"] = False
+                st.session_state["ee_cred_form_ver"] = ee_form_ver + 1
+                st.rerun()
+            elif linked_ee_cred and st.button("Cancel", key="ee_cred_cancel_btn"):
+                st.session_state["ee_cred_editing"] = False
+                st.rerun()
 
         st.markdown(
             "<small style='color:#64748B;'>New to Earth Engine? Register free at "
@@ -742,7 +901,8 @@ with st.sidebar:
     st.divider()
     st.markdown(
         "**Model architecture:**\n"
-        "- **Model version:** `RCRC v3.1`"
+        "- **Model version:** `RCRC v3.1`\n"
+        f"- **Platform version:** `RCR Scout v{APP_VERSION}`"
     )
     st.divider()
     st.markdown(
@@ -775,17 +935,24 @@ step1_preview_container = st.container()
 
 lib_boundaries = get_library_boundary_files()
 
-boundary_options = ["📤 Upload custom boundary files (.shp, .zip, .geojson, .gpkg, .kml)"]
+boundary_options = ["📤 Upload custom boundary files"]
 if lib_boundaries:
     boundary_options.append(f"📁 Select from Field Library ({len(lib_boundaries)} pre-loaded research fields)")
 
-boundary_mode = st.radio(
-    "Field boundary source:",
-    options=boundary_options,
-    index=0,
-    horizontal=True,
-    key="boundary_source_mode",
-)
+# Safety check for active session state if radio options changed
+if st.session_state.get("boundary_source_mode") not in boundary_options:
+    st.session_state["boundary_source_mode"] = boundary_options[0]
+
+if lib_boundaries:
+    boundary_mode = st.radio(
+        "Field boundary source:",
+        options=boundary_options,
+        index=0,
+        horizontal=True,
+        key="boundary_source_mode",
+    )
+else:
+    boundary_mode = boundary_options[0]
 
 target_vector_path: Optional[Path] = None
 inferred_default_fid = "FIELD_1"
@@ -810,9 +977,10 @@ if boundary_mode.startswith("📁") and lib_boundaries:
         geom_sig = f"lib:{selected_lib_path.name}"
 else:
     uploaded_polys = st.file_uploader(
-        "Upload your field boundary polygon (.shp, .gpkg, .geojson, .kml, or .zip):",
+        "Upload custom boundary files",
         type=["gpkg", "geojson", "json", "kml", "shp", "shx", "dbf", "prj", "cpg", "zip"],
         accept_multiple_files=True,
+        label_visibility="collapsed" if lib_boundaries else "visible",
         help="Upload a .zip containing the shapefile files, or individual .shp + .shx + .dbf + .prj files.",
     )
     if uploaded_polys:
@@ -1055,7 +1223,44 @@ run_pheno_btn = st.button(
 if pinfo is None:
     st.caption("ℹ️ Please upload your field boundary polygon in **Step 1** to enable Sentinel-2 extraction.")
 
-if run_pheno_btn and pinfo is not None:
+def _has_gee_access() -> bool:
+    """True if any Earth Engine authentication source is available to the worker."""
+    if st.session_state.get("custom_ee_credentials"):
+        return True
+    env_keys = ["EARTHENGINE_TOKEN", "EARTHENGINE_CREDENTIALS"]
+    if any(os.environ.get(k) for k in env_keys):
+        return True
+    if os.environ.get("EARTHENGINE_SERVICE_ACCOUNT") and os.environ.get("EARTHENGINE_PRIVATE_KEY"):
+        return True
+    try:
+        if hasattr(st, "secrets"):
+            if any(k in st.secrets for k in env_keys):
+                return True
+            if "EARTHENGINE_SERVICE_ACCOUNT" in st.secrets and "EARTHENGINE_PRIVATE_KEY" in st.secrets:
+                return True
+    except Exception:
+        pass
+    # Local authorization via `earthengine authenticate` / authenticate_earth_engine.bat
+    return (Path.home() / ".config" / "earthengine" / "credentials").exists()
+
+
+_pheno_cache_csv = (
+    WORKSPACE_DIR / "outputs" / "reports" / f"{pinfo['field_id']}_{int(season_input)}_phenology_curve.csv"
+    if pinfo is not None
+    else None
+)
+_pheno_cache_ok = bool(use_cached_pheno and _pheno_cache_csv is not None and _pheno_cache_csv.exists())
+
+if run_pheno_btn and pinfo is not None and not _has_gee_access() and not _pheno_cache_ok:
+    st.error(
+        "⚠️ **Step 2 could not run: no Google Earth Engine account is linked.**\n\n"
+        "The Sentinel-2 analysis needs access to Google Earth Engine. You can:\n"
+        "1. **Link your account**: open the left sidebar → **🔑 Earth Engine Access & Credentials**, "
+        "enter your Project ID and upload your Service Account key (`.json`).\n"
+        "2. **Skip Step 2**: if you already have PlanetScope imagery, go directly to **Step 3 (Stage Imagery)**.\n"
+        "3. **No account yet?** Register for free at [code.earthengine.google.com](https://code.earthengine.google.com)."
+    )
+elif run_pheno_btn and pinfo is not None:
     with st.spinner(f"Extracting Sentinel-2 NDVI season progress trajectory for {pinfo['field_id']} ({season_input})..."):
         try:
             pheno_res = run_worker({
@@ -1210,6 +1415,31 @@ if "step3_imagery_tab" not in st.session_state:
     else:
         st.session_state["step3_imagery_tab"] = STEP3_TAB_OPTIONS[0]
 
+def _render_planet_error(exc: Exception, order_id: Optional[str] = None):
+    err_str = str(exc)
+    oid_txt = f" for Order ID `{order_id}`" if order_id else ""
+    if "401" in err_str or "unauthorized" in err_str.lower() or "authentication failed" in err_str.lower():
+        st.error(
+            f"🔑 **Planet API authentication failed (401 Unauthorized)**{oid_txt}.\n\n"
+            f"**Please verify:**\n"
+            f"1. Your Planet API key in the **Personal Planet API key** field above is correct.\n"
+            f"2. Your Planet user account has active permissions to access this order.\n"
+            f"3. You can verify your key anytime in your [Planet account settings](https://www.planet.com/account/)."
+        )
+    elif "404" in err_str or "not found" in err_str.lower():
+        st.error(
+            f"🔍 **Planet Order not found (404)**{oid_txt}. Please verify that the 36-character Order UUID was entered correctly."
+        )
+    elif "expired" in err_str.lower() or "no clipped geotiff rasters" in err_str.lower() or "0 download files" in err_str.lower():
+        st.error(
+            f"📦 **Planet Order rasters unavailable**{oid_txt}.\n\n"
+            f"{err_str}\n\n"
+            f"💡 **Tip:** If you already downloaded this order from Planet Explorer, switch to **Option A (Upload downloaded PlanetScope GeoTIFFs)** above "
+            f"to upload the GeoTIFF file(s) or ZIP bundle directly."
+        )
+    else:
+        st.error(f"Planet request error: {err_str}")
+
 tab_manual, tab_api = st.tabs(
     STEP3_TAB_OPTIONS,
     key="step3_imagery_tab",
@@ -1230,48 +1460,68 @@ selected_early_date: Optional[str] = None
 available_classification_captures: List[Dict[str, str]] = []  # [{"date_str": "20250808", "date_iso": "2025-08-08", "path": "..."}]
 
 # ------------------------------------------------------------------------------
-# TAB A: UPLOAD DOWNLOADED PLANETSCOPE .TIF FILES ONLY
+# TAB A: UPLOAD DOWNLOADED PLANETSCOPE .TIF FILES OR ORDER ZIP
 # ------------------------------------------------------------------------------
 with tab_manual:
     st.markdown(
-        "Upload the **8-band surface reflectance PlanetScope GeoTIFFs** downloaded from **Planet Explorer**."
+        "Upload the **ZIP file downloaded from Planet** as it is — no need to unzip it. "
+        "The platform automatically finds the 8-band Surface Reflectance image of each date and ignores "
+        "the other files of the order (metadata `.json`/`.xml` and the `udm2` cloud mask)."
     )
 
-    u1, u2 = st.columns(2, gap="large")
-    with u1:
-        up_early = st.file_uploader(
-            "1. Upload early baseline PlanetScope GeoTIFF (peak canopy mask):",
-            type=["tif", "tiff"],
-            key="up_early_tif",
-        )
-    with u2:
-        up_targets = st.file_uploader(
-            "2. Upload PlanetScope GeoTIFF(s) for classification dates:",
-            type=["tif", "tiff"],
-            accept_multiple_files=True,
-            key="up_target_tifs",
-        )
+    up_files = st.file_uploader(
+        "Upload Planet order ZIP (or the files inside it):",
+        type=["zip", "tif", "tiff", "json", "xml"],
+        accept_multiple_files=True,
+        key="up_planet_tifs_multi",
+        help="Upload the .zip downloaded from Planet. You can also drop the unzipped files (all of them is fine); "
+             "only the *_AnalyticMS_SR_8b_harmonized_clip.tif image is used.",
+    )
 
-    if up_early and up_targets:
-        save_dir = SAT_BASE_DIR / active_fid / str(season_input)
-        save_dir.mkdir(parents=True, exist_ok=True)
+    save_dir = SAT_BASE_DIR / active_fid / str(season_input)
+    save_dir.mkdir(parents=True, exist_ok=True)
 
-        early_path = save_dir / Path(up_early.name).name
-        early_path.write_bytes(up_early.getvalue())
-        selected_early_date = parse_date_from_filename(up_early.name) or f"{season_input}0701"
+    if up_files:
+        staged_paths = list(st.session_state.get("manual_uploaded_files", []))
+        added_count = 0
+        skipped_files: List[tuple] = []
+        loose_names = [Path(uf.name).name for uf in up_files if not uf.name.lower().endswith(".zip")]
+        keep_loose = set(select_sr_rasters(loose_names))
+        for uf in up_files:
+            uf_name = Path(uf.name).name
+            if uf_name.lower().endswith(".zip"):
+                zip_path = save_dir / uf_name
+                zip_path.write_bytes(uf.getvalue())
+                try:
+                    extracted, zip_skipped = extract_sr_rasters_from_zip(zip_path, save_dir)
+                except Exception as zip_err:
+                    st.error(f"Error extracting ZIP archive '{uf_name}': {zip_err}")
+                    continue
+                finally:
+                    zip_path.unlink(missing_ok=True)
+                skipped_files.extend(zip_skipped)
+                if not extracted:
+                    st.warning(
+                        f"⚠️ No 8-band Surface Reflectance image was found inside `{uf_name}`. "
+                        "When ordering from Planet, select the **Surface Reflectance – 8 band** product (`analytic_8b_sr_udm2`)."
+                    )
+                for ext_path in extracted:
+                    if str(ext_path) not in staged_paths:
+                        staged_paths.append(str(ext_path))
+                        added_count += 1
+            elif uf_name in keep_loose:
+                tif_path = save_dir / uf_name
+                tif_path.write_bytes(uf.getvalue())
+                if str(tif_path) not in staged_paths:
+                    staged_paths.append(str(tif_path))
+                    added_count += 1
+            else:
+                ok, reason = describe_planet_file(uf_name)
+                skipped_files.append((uf_name, "duplicate of a preferred 8-band harmonized image" if ok else reason))
 
-        uploaded_t_paths = []
-        sorted_targets = sorted(up_targets, key=lambda x: parse_date_from_filename(x.name) or x.name)
-        for idx, uf in enumerate(sorted_targets):
-            t_path = save_dir / Path(uf.name).name
-            t_path.write_bytes(uf.getvalue())
-            uploaded_t_paths.append(str(t_path))
-
-        st.session_state["manual_uploaded_files"] = [str(early_path)] + uploaded_t_paths
-        st.success(
-            f"Uploaded 1 early baseline image (`{format_yyyymmdd_iso(selected_early_date)}`) and "
-            f"{len(uploaded_t_paths)} classification image(s)."
-        )
+        st.session_state["manual_uploaded_files"] = staged_paths
+        if added_count > 0:
+            st.success(f"✅ Staged {added_count} PlanetScope image(s) for Field `{active_fid}` ({season_input})!")
 
 # ------------------------------------------------------------------------------
 # TAB B: PERSONAL PLANET API KEY (AUTO-SEARCH & CLIP ORDER)
@@ -1285,8 +1535,7 @@ with tab_api:
     )
     api_c1, api_c2, api_c3 = st.columns([1.6, 1.0, 1.0])
     with api_c1:
-        default_pl_key = st.session_state.get("planet_api_key", "")
-        if not default_pl_key:
+        if not st.session_state.get("planet_api_key") and not st.session_state.get("planet_key_unlinked"):
             default_pl_key = os.environ.get("PL_API_KEY") or os.environ.get("PLANET_API_KEY") or ""
             if not default_pl_key:
                 try:
@@ -1297,19 +1546,51 @@ with tab_api:
             if default_pl_key:
                 st.session_state["planet_api_key"] = default_pl_key
 
-        if "planet_api_key_input" not in st.session_state or (default_pl_key and not st.session_state.get("planet_api_key_input")):
-            st.session_state["planet_api_key_input"] = default_pl_key
-
-        planet_api_key_raw = st.text_input(
-            "Personal Planet API key:",
-            key="planet_api_key_input",
-            type="password",
-            placeholder="Paste your PL_API_KEY here...",
-            help="Found in your Planet account settings -> API key. Never stored on disk.",
-        )
-        planet_api_key = str(planet_api_key_raw or "").strip().strip("'").strip('"').strip()
-        if planet_api_key:
-            st.session_state["planet_api_key"] = planet_api_key
+        planet_api_key = st.session_state.get("planet_api_key", "")
+        if planet_api_key and not st.session_state.get("planet_key_editing"):
+            saved_note = "saved on this computer" if st.session_state.get("planet_key_saved") else "this session only"
+            st.success(f"✅ Planet API key linked (••••{planet_api_key[-4:]}, {saved_note})")
+            pl_b1, pl_b2 = st.columns(2)
+            if pl_b1.button("🔄 Change key", key="planet_key_change_btn", use_container_width=True):
+                st.session_state["planet_key_editing"] = True
+                st.rerun()
+            if pl_b2.button("🗑️ Unlink", key="planet_key_unlink_btn", use_container_width=True):
+                st.session_state["planet_api_key"] = ""
+                st.session_state["planet_key_saved"] = False
+                st.session_state["planet_key_unlinked"] = True
+                update_linked_accounts(planet_api_key=None)
+                st.rerun()
+        else:
+            pl_form_ver = st.session_state.get("planet_key_form_ver", 0)
+            planet_api_key_raw = st.text_input(
+                "Personal Planet API key:",
+                key=f"planet_api_key_input_{pl_form_ver}",
+                type="password",
+                placeholder="Paste your PL_API_KEY here...",
+                help="Found in your Planet account settings -> API key.",
+            )
+            remember_pl = st.checkbox(
+                "Remember on this computer",
+                value=ACCOUNT_STORE_ENABLED,
+                disabled=not ACCOUNT_STORE_ENABLED,
+                key=f"planet_key_remember_{pl_form_ver}",
+                help=f"Saves the key to {ACCOUNTS_STORE_PATH} so you don't need to enter it again."
+                if ACCOUNT_STORE_ENABLED
+                else "Not available on the shared web version of the platform.",
+            )
+            new_pl_key = str(planet_api_key_raw or "").strip().strip("'").strip('"').strip()
+            if new_pl_key:
+                st.session_state["planet_api_key"] = new_pl_key
+                st.session_state["planet_key_saved"] = bool(remember_pl and ACCOUNT_STORE_ENABLED)
+                update_linked_accounts(planet_api_key=new_pl_key if remember_pl else None)
+                st.session_state["planet_key_editing"] = False
+                st.session_state["planet_key_form_ver"] = pl_form_ver + 1
+                st.rerun()
+            elif planet_api_key and st.button("Cancel", key="planet_key_cancel_btn"):
+                st.session_state["planet_key_editing"] = False
+                st.rerun()
+            # While editing, keep using the currently linked key (if any) until a new one is entered
+            planet_api_key = st.session_state.get("planet_api_key", "")
     with api_c2:
         search_start_str = st.text_input(
             "Season start date (YYYY-MM-DD):",
@@ -1388,18 +1669,54 @@ with tab_api:
         all_scenes = sr.get("all_scenes", [])
         suggested_ids = sr.get("suggested_scene_ids", [])
 
+        st.markdown('<div class="md-output-title">🎯 Available PlanetScope 8-band scenes across season</div>', unsafe_allow_html=True)
+
+        cov_filt_c1, cov_filt_c2 = st.columns([1.6, 2.4])
+        with cov_filt_c1:
+            only_full_cov = st.checkbox(
+                "🛡️ Full field coverage only (≥98%)",
+                value=True,
+                key="planet_catalog_filter_full_cov",
+                help="When enabled, hides any captures that only partially overlap your field boundary."
+            )
+        with cov_filt_c2:
+            st.caption("💡 Partial scenes cover only a fraction of your field and result in incomplete RCR maps. Keep checked for optimal full-field results.")
+
+        # Filter scenes based on toggle
+        if only_full_cov:
+            filtered_scenes = [s for s in all_scenes if float(s.get("coverage_pct", 100.0)) >= 98.0]
+            if not filtered_scenes:
+                st.warning("⚠️ No captures with ≥98% coverage found in this date window. Showing all available passes instead.")
+                filtered_scenes = all_scenes
+        else:
+            filtered_scenes = all_scenes
+
         # Build table with an interactive Select column
         display_rows = []
         is_selected_initial = []
-        for s in all_scenes:
+        for s in filtered_scenes:
             is_suggested = s["scene_id"] in suggested_ids
             is_selected_initial.append(is_suggested)
+
+            cov_val = float(s.get("coverage_pct", 100.0))
+            if cov_val >= 99.0:
+                cov_badge = "🟢 100% (Full)"
+            elif cov_val >= 90.0:
+                cov_badge = f"🟡 {cov_val:.1f}% (High)"
+            elif cov_val >= 50.0:
+                cov_badge = f"🟠 {cov_val:.1f}% (Partial)"
+            else:
+                cov_badge = f"🔴 {cov_val:.1f}% (Low)"
+
             display_rows.append({
                 "Select": is_suggested,
                 "Acquisition date": s["date_iso"],
-                "Suggestion status": f"⭐ {s['suggestion']}" if s.get("suggestion") else "— Available pass",
-                "Planet scene ID": s["scene_id"],
+                "Field coverage": cov_badge,
                 "Cloud cover (%)": s["cloud_cover_pct"],
+                "Clear (%)": s.get("clear_percent"),
+                "Sun elevation (°)": s.get("sun_elevation"),
+                "View angle (°)": s.get("view_angle"),
+                "Planet scene ID": s["scene_id"],
                 "Instrument": s["instrument"],
             })
 
@@ -1407,15 +1724,19 @@ with tab_api:
             display_rows[0]["Select"] = True
 
         catalog_df = pd.DataFrame(display_rows)
+        suggested_row_mask = [s["scene_id"] in suggested_ids for s in filtered_scenes]
 
-        st.markdown('<div class="md-output-title">🎯 Available PlanetScope 8-band scenes across season</div>', unsafe_allow_html=True)
+        def _highlight_suggested(row):
+            style = "background-color: rgba(255, 193, 7, 0.22)" if suggested_row_mask[row.name] else ""
+            return [style] * len(row)
+
         st.info(
             "💡 **Direct catalog selection:** Check or uncheck scenes directly in the **Select** column of the table below to choose which captures to download. "
-            "Suggested captures based on your Sentinel-2 NDVI plot are pre-checked."
+            "Captures suggested from your Sentinel-2 NDVI plot are **highlighted in amber** and pre-checked."
         )
 
         edited_catalog = st.data_editor(
-            catalog_df,
+            catalog_df.style.apply(_highlight_suggested, axis=1),
             column_config={
                 "Select": st.column_config.CheckboxColumn(
                     "Select",
@@ -1423,15 +1744,37 @@ with tab_api:
                     default=False,
                 ),
                 "Acquisition date": st.column_config.TextColumn("Acquisition date"),
-                "Suggestion status": st.column_config.TextColumn("Suggestion status"),
-                "Planet scene ID": st.column_config.TextColumn("Planet scene ID"),
+                "Field coverage": st.column_config.TextColumn(
+                    "Field coverage",
+                    help="Geometric percentage of your field boundary covered by this PlanetScope scene footprint.",
+                ),
                 "Cloud cover (%)": st.column_config.NumberColumn("Cloud cover (%)", format="%.1f%%"),
+                "Clear (%)": st.column_config.NumberColumn(
+                    "Clear (%)",
+                    format="%.0f%%",
+                    help="Share of the whole scene flagged clear by Planet's UDM2 (no cloud, haze, shadow or snow). "
+                         "Scene-wide, not field-specific: use the previews below to check your field.",
+                ),
+                "Sun elevation (°)": st.column_config.NumberColumn(
+                    "Sun elevation (°)",
+                    format="%.0f°",
+                    help="Low sun angles (< ~30°) produce longer shadows and darker, less comparable reflectance.",
+                ),
+                "View angle (°)": st.column_config.NumberColumn(
+                    "View angle (°)",
+                    format="%.1f°",
+                    help="Off-nadir viewing angle of the satellite. Lower is better for geometric and radiometric consistency.",
+                ),
+                "Planet scene ID": st.column_config.TextColumn("Planet scene ID"),
                 "Instrument": st.column_config.TextColumn("Instrument"),
             },
-            disabled=["Acquisition date", "Suggestion status", "Planet scene ID", "Cloud cover (%)", "Instrument"],
+            disabled=[
+                "Acquisition date", "Field coverage", "Cloud cover (%)", "Clear (%)",
+                "Sun elevation (°)", "View angle (°)", "Planet scene ID", "Instrument",
+            ],
             hide_index=True,
             use_container_width=True,
-            key="planet_catalog_table_selector",
+            key=f"planet_catalog_table_selector_{only_full_cov}",
         )
 
         selected_rows = edited_catalog[edited_catalog["Select"] == True]
@@ -1441,26 +1784,91 @@ with tab_api:
         if chosen_scene_ids:
             dates_summary = ", ".join([f"`{d}`" for d in chosen_dates])
             st.markdown(f"**Selected capture(s) to order ({len(chosen_scene_ids)}):** {dates_summary}")
+
+            # Alert if any selected capture is partial
+            partial_selected = [
+                f"`{row['Acquisition date']}` ({row['Field coverage']})"
+                for _, row in selected_rows.iterrows()
+                if "Full" not in str(row.get("Field coverage", "")) and "100%" not in str(row.get("Field coverage", ""))
+            ]
+            if partial_selected:
+                st.warning(
+                    f"⚠️ **Partial Field Coverage Warning:** The following selected capture(s) do not cover 100% of your field boundary: "
+                    f"{', '.join(partial_selected)}. "
+                    "Downstream classification for these dates will produce a partial map covering only the captured portion of the field."
+                )
         else:
             st.warning("⚠️ No captures currently selected. Please check at least one scene in the table above.")
 
-        def _render_planet_error(exc: Exception, order_id: Optional[str] = None):
-            err_str = str(exc)
-            oid_txt = f" for Order ID `{order_id}`" if order_id else ""
-            if "401" in err_str or "unauthorized" in err_str.lower() or "authentication failed" in err_str.lower():
-                st.error(
-                    f"🔑 **Planet API authentication failed (401 Unauthorized)**{oid_txt}.\n\n"
-                    f"**Please verify:**\n"
-                    f"1. Your Planet API key in the **Personal Planet API key** field above is correct.\n"
-                    f"2. Your Planet user account has active permissions to access this order.\n"
-                    f"3. You can verify your key anytime in your [Planet account settings](https://www.planet.com/account/)."
+        # Visual quality check: field-cropped true-colour previews of the selected scenes.
+        # Previews are fetched on demand only and cached per (field boundary, scene) so reruns never refetch.
+        st.markdown('<div class="md-output-title">🔍 Visual quality check</div>', unsafe_allow_html=True)
+        preview_store = st.session_state["planet_scene_previews"]
+        preview_sig = st.session_state.get("poly_sig", "")
+        scenes_by_id = {s["scene_id"]: s for s in all_scenes}
+        unpreviewed_ids = [sid for sid in chosen_scene_ids if f"{preview_sig}|{sid}" not in preview_store]
+        ids_to_preview = unpreviewed_ids[:MAX_PLANET_PREVIEWS_PER_CLICK]
+
+        prev_c1, prev_c2 = st.columns([1.6, 2.4])
+        with prev_c1:
+            preview_btn = st.button(
+                f"🔍 Preview {len(ids_to_preview)} selected scene(s)",
+                disabled=(not ids_to_preview or not planet_api_key),
+                key="planet_preview_btn",
+            )
+        with prev_c2:
+            st.caption(
+                "💡 Shows each selected capture in true colour, cropped to your field with the boundary outlined, "
+                "so you can spot clouds, haze or shadows before ordering. No order is placed."
+            )
+
+        if preview_btn and ids_to_preview:
+            if len(unpreviewed_ids) > len(ids_to_preview):
+                st.info(
+                    f"Previewing the first {len(ids_to_preview)} of {len(unpreviewed_ids)} selected scenes. "
+                    "Click again to preview the rest."
                 )
-            elif "404" in err_str or "not found" in err_str.lower():
-                st.error(
-                    f"🔍 **Planet Order not found (404)**{oid_txt}. Please verify that the 36-character Order UUID was entered correctly."
-                )
-            else:
-                st.error(f"Planet request error: {err_str}")
+            with st.spinner(f"Fetching Planet true-colour previews for {len(ids_to_preview)} scene(s)..."):
+                try:
+                    preview_res = run_worker({
+                        "action": "preview_planet_scenes",
+                        "api_key": planet_api_key,
+                        "boundary_geojson_path": pinfo["boundary_geojson_path"],
+                        "scene_ids": ids_to_preview,
+                        "max_scenes": MAX_PLANET_PREVIEWS_PER_CLICK,
+                    })
+                    failed = []
+                    for p in preview_res.get("previews", []):
+                        if p.get("status") == "error":
+                            failed.append(p["scene_id"])  # not cached, so the user can retry
+                        else:
+                            preview_store[f"{preview_sig}|{p['scene_id']}"] = p
+                    if failed:
+                        st.warning(f"⚠️ Could not build a preview for {len(failed)} scene(s). Click the button again to retry.")
+                except Exception as e:
+                    st.error(f"Planet preview failed: {e}")
+
+        previewed_ids = [sid for sid in chosen_scene_ids if f"{preview_sig}|{sid}" in preview_store]
+        for row_start in range(0, len(previewed_ids), 3):
+            grid_cols = st.columns(3)
+            for col, sid in zip(grid_cols, previewed_ids[row_start : row_start + 3]):
+                p = preview_store[f"{preview_sig}|{sid}"]
+                s = scenes_by_id.get(sid, {})
+                with col:
+                    if p.get("status") == "ok" and Path(p.get("png_path", "")).exists():
+                        render_crisp_figure(p["png_path"], use_svg_if_available=False, full_width=True, max_height_px=360)
+                    else:
+                        st.warning(p.get("message") or "No preview available for this scene.")
+                    clear_val = s.get("clear_percent")
+                    clear_txt = f"{clear_val:.0f}%" if clear_val is not None else "n/a"
+                    caption = (
+                        f"**{s.get('date_iso', sid)}** · clear {clear_txt} · "
+                        f"cloud {float(s.get('cloud_cover_pct', 0.0)):.1f}% · "
+                        f"coverage {float(s.get('coverage_pct', 0.0)):.0f}%"
+                    )
+                    if s.get("suggestion"):
+                        caption += f"  \n🟡 {s['suggestion']}"
+                    st.caption(caption)
 
         if st.button(
             f"⬇️ 2. Order & download {len(chosen_scene_ids)} selected scene(s) via Planet API",
@@ -1506,7 +1914,7 @@ with tab_api:
         "If an order was previously submitted or timed out while Planet was clipping scenes in the background, "
         "enter the **Planet Order ID** below to check its status or download the completed GeoTIFFs without spending additional quota:"
     )
-    res_c1, res_c2, res_c3 = st.columns([2.0, 1.0, 1.2])
+    res_c1, res_c2 = st.columns([2.0, 1.0])
     with res_c1:
         saved_oid_file = SAT_BASE_DIR / active_fid / str(season_input) / "last_planet_order_id.txt"
         saved_oid = ""
@@ -1532,14 +1940,11 @@ with tab_api:
             "🔎 Check status",
             help="Instantly checks whether Planet has finished clipping without waiting.",
         )
-    with res_c3:
-        st.write("")
-        st.write("")
-        resume_order_btn = st.button(
-            "📥 Download order by ID",
-            type="primary",
-            help="Downloads clipped GeoTIFFs if ready, or polls until clipping completes.",
-        )
+    resume_order_btn = st.button(
+        "📥 Download order by ID",
+        type="primary",
+        help="Downloads clipped GeoTIFFs if ready, or polls until clipping completes.",
+    )
 
     if check_status_btn:
         if not planet_api_key:
@@ -1622,12 +2027,178 @@ def _format_raster_display(p: Path) -> str:
     iso = format_yyyymmdd_iso(d_str) if d_str else "Unknown date"
     return f"📅 {iso} · {p.name}"
 
+
+_capture_calendar_component = components.declare_component(
+    "capture_calendar", path=str(APP_DIR / "components" / "capture_calendar")
+)
+CAL_MODE_TARGETS = "Classification dates (add / remove)"
+CAL_MODE_PEAK = "Peak canopy mask"
+
+
+def _sort_rasters_by_date(paths: List[Path]) -> List[Path]:
+    return sorted(paths, key=lambda p: (parse_date_from_filename(p.name) or "99999999", p.name))
+
+
+def _on_capture_calendar_click() -> None:
+    """Apply a calendar day click to the Step 4 peak / classification selectors."""
+    click = st.session_state.get("capture_calendar_click") or {}
+    day_paths = [Path(p) for p in st.session_state.get("_capture_calendar_days", {}).get(click.get("day"), [])]
+    if not day_paths:
+        return
+    if st.session_state.get("calendar_click_mode") == CAL_MODE_PEAK:
+        st.session_state["peak_canopy_select"] = day_paths[0]
+        return
+    current = list(st.session_state.get("classification_targets_select", []))
+    if any(p in current for p in day_paths):
+        current = [p for p in current if p not in day_paths]
+    else:
+        current.extend(day_paths)
+    st.session_state["classification_targets_select"] = _sort_rasters_by_date(current)
+
+
+def _render_capture_calendar(
+    rasters: List[Path],
+    peak_path: Optional[Path],
+    target_paths: List[Path],
+    s2_peak_iso: Optional[str] = None,
+) -> None:
+    """Render a month calendar of capture dates and their Step 4 roles; clicking a capture day edits the roles."""
+    captures_by_day: Dict[date, List[Path]] = {}
+    for p in rasters:
+        d_str = parse_date_from_filename(p.name)
+        if d_str:
+            try:
+                captures_by_day.setdefault(datetime.strptime(d_str, "%Y%m%d").date(), []).append(p)
+            except ValueError:
+                pass
+    if not captures_by_day:
+        return
+
+    peak_day = None
+    if peak_path is not None:
+        pk = parse_date_from_filename(Path(peak_path).name)
+        peak_day = datetime.strptime(pk, "%Y%m%d").date() if pk else None
+    target_names = {Path(p).name for p in target_paths}
+    s2_day = None
+    if s2_peak_iso:
+        try:
+            s2_day = datetime.strptime(s2_peak_iso, "%Y-%m-%d").date()
+        except ValueError:
+            s2_day = None
+
+    first_day, last_day = min(captures_by_day), max(captures_by_day)
+    months = []
+    y, m = first_day.year, first_day.month
+    while (y, m) <= (last_day.year, last_day.month):
+        months.append((y, m))
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+
+    cal = calendar.Calendar(firstweekday=6)  # Sunday-first, as on US wall calendars
+    month_html = []
+    for y, m in months:
+        cells = "".join(f'<div class="rcal-dow">{d}</div>' for d in ("S", "M", "T", "W", "T", "F", "S"))
+        for day in cal.itermonthdates(y, m):
+            if day.month != m:
+                cells += '<div class="rcal-day rcal-out"></div>'
+                continue
+            classes = ["rcal-day"]
+            tips = [day.isoformat()]
+            extra_attrs = ""
+            day_captures = captures_by_day.get(day, [])
+            if day_captures:
+                classes.append("rcal-click")
+                extra_attrs = f' data-day="{day.isoformat()}" role="button" tabindex="0"'
+                is_peak = peak_day == day
+                is_target = any(p.name in target_names for p in day_captures)
+                if is_peak and is_target:
+                    classes.append("rcal-both")
+                    tips.append("Peak canopy mask + classification")
+                elif is_peak:
+                    classes.append("rcal-peak")
+                    tips.append("Peak canopy mask")
+                elif is_target:
+                    classes.append("rcal-target")
+                    tips.append("Classification date")
+                else:
+                    classes.append("rcal-avail")
+                    tips.append("Available, not selected")
+                if peak_day and is_target and not is_peak:
+                    tips.append(f"{(day - peak_day).days:+d} days from peak")
+                tips.extend(p.name for p in day_captures)
+            if s2_day == day:
+                classes.append("rcal-s2")
+                tips.append("Sentinel-2 NDVI peak")
+            class_attr = " ".join(classes)
+            tip_attr = "&#10;".join(html.escape(t) for t in tips)
+            cells += f'<div class="{class_attr}" title="{tip_attr}"{extra_attrs}>{day.day}</div>'
+        month_html.append(
+            f'<div class="rcal-month"><div class="rcal-mtitle">{calendar.month_name[m]} {y}</div>'
+            f'<div class="rcal-grid">{cells}</div></div>'
+        )
+
+    legend = (
+        '<div class="rcal-legend">'
+        '<span><i class="rcal-sw rcal-peak"></i>Peak canopy mask</span>'
+        '<span><i class="rcal-sw rcal-target"></i>Classification date</span>'
+        '<span><i class="rcal-sw rcal-both"></i>Both</span>'
+        '<span><i class="rcal-sw rcal-avail"></i>Available, not selected</span>'
+        + ('<span><i class="rcal-sw rcal-s2dot"></i>Sentinel-2 NDVI peak</span>' if s2_day else "")
+        + "</div>"
+    )
+    # The calendar renders inside a component iframe, so it needs its own copy of the theme tokens and font
+    style = (
+        "@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap');"
+        ":root{--illini-blue:#13294B;--illini-blue-accent:#1D58A7;--illini-blue-light:#E8F0FE;"
+        "--illini-orange:#FF5F05;--md-surface:#FFFFFF;--md-outline:#DCE2EC;--md-text-secondary:#4A5B75;}"
+        "body{font-family:'Montserrat',-apple-system,BlinkMacSystemFont,sans-serif;}"
+        ".rcal-wrap{background:var(--md-surface);border:1px solid var(--md-outline);border-radius:12px;"
+        "padding:0.9rem 1rem 0.7rem;margin:0.4rem 0 0.9rem;}"
+        ".rcal-months{display:flex;flex-wrap:wrap;justify-content:center;gap:1.1rem 1.6rem;}"
+        ".rcal-month{flex:0 0 auto;}"
+        ".rcal-mtitle{font-weight:700;font-size:0.86rem;color:var(--illini-blue);margin-bottom:0.3rem;"
+        "text-align:center;}"
+        ".rcal-grid{display:grid;grid-template-columns:repeat(7,1.9rem);gap:3px;}"
+        ".rcal-dow{font-size:0.66rem;font-weight:600;color:var(--md-text-secondary);text-align:center;}"
+        ".rcal-day{height:1.9rem;line-height:1.9rem;text-align:center;font-size:0.74rem;border-radius:50%;"
+        "color:#9AA6B8;position:relative;cursor:default;}"
+        ".rcal-avail{color:var(--illini-blue);font-weight:600;box-shadow:inset 0 0 0 1.5px var(--illini-blue-accent);"
+        "background:var(--illini-blue-light);}"
+        ".rcal-target{background:var(--illini-blue);color:#FFFFFF;font-weight:700;}"
+        ".rcal-peak{background:var(--illini-orange);color:#FFFFFF;font-weight:700;}"
+        ".rcal-both{background:var(--illini-orange);color:#FFFFFF;font-weight:700;"
+        "box-shadow:0 0 0 2px var(--md-surface),0 0 0 4px var(--illini-blue);}"
+        ".rcal-s2::after{content:'';position:absolute;left:50%;bottom:1px;width:5px;height:5px;margin-left:-2.5px;"
+        "border-radius:50%;background:#2E9E5B;}"
+        ".rcal-legend{display:flex;flex-wrap:wrap;justify-content:center;gap:0.4rem 1.1rem;margin-top:0.7rem;font-size:0.74rem;"
+        "color:var(--md-text-secondary);}"
+        ".rcal-legend span{display:inline-flex;align-items:center;gap:0.35rem;}"
+        ".rcal-sw{display:inline-block;width:0.8rem;height:0.8rem;border-radius:50%;}"
+        ".rcal-sw.rcal-both{box-shadow:0 0 0 1.5px var(--md-surface),0 0 0 3px var(--illini-blue);}"
+        ".rcal-s2dot{width:0.45rem;height:0.45rem;background:#2E9E5B;}"
+        ".rcal-click{cursor:pointer;transition:transform 0.12s ease;}"
+        ".rcal-click:hover{transform:scale(1.14);}"
+        ".rcal-click:focus-visible{outline:2px solid var(--illini-orange);outline-offset:2px;}"
+        ".rcal-hint{margin-top:0.35rem;text-align:center;font-size:0.7rem;color:var(--md-text-secondary);font-style:italic;}"
+    )
+    months_attr = "".join(month_html)
+    hint = '<div class="rcal-hint">Click a highlighted date to change its role.</div>'
+    st.session_state["_capture_calendar_days"] = {
+        d.isoformat(): [str(p) for p in paths] for d, paths in captures_by_day.items()
+    }
+    _capture_calendar_component(
+        html=f'<div class="rcal-wrap"><div class="rcal-months">{months_attr}</div>{legend}{hint}</div>',
+        css=style,
+        key="capture_calendar_click",
+        on_change=_on_capture_calendar_click,
+        default=None,
+    )
+
 discovered_rasters_map: Dict[str, Path] = {}
 
 # 1. Any rasters from API downloads or manual uploads in session
 for p_str in st.session_state.get("api_downloaded_files", []) + st.session_state.get("manual_uploaded_files", []):
     p = Path(p_str)
-    if p.exists() and p.name not in discovered_rasters_map:
+    if p.exists() and is_planet_sr_raster(p.name) and p.name not in discovered_rasters_map:
         discovered_rasters_map[p.name] = p
 
 # 2. Any rasters in routine_inspection/raw_satellite/
@@ -1652,13 +2223,20 @@ if active_fid in ("FIELD_1", "PC3") or inferred_default_fid in ("FIELD_1", "PC3"
 for cdir in candidate_dirs:
     if cdir.exists():
         for f in cdir.rglob("*.tif*"):
-            if f.is_file() and "udm" not in f.name.lower() and f.name not in discovered_rasters_map:
-                if "sr" in f.name.lower() or "analytic" in f.name.lower() or "clip" in f.name.lower():
+            if f.is_file() and is_planet_sr_raster(f.name) and f.name not in discovered_rasters_map:
+                discovered_rasters_map[f.name] = f
+
+# Fallback: check any directories under SAT_BASE_DIR that have tifs for this season
+if not discovered_rasters_map:
+    for s_dir in SAT_BASE_DIR.glob(f"*/{season_input}"):
+        if s_dir.is_dir():
+            for f in s_dir.rglob("*.tif*"):
+                if f.is_file() and is_planet_sr_raster(f.name) and f.name not in discovered_rasters_map:
                     discovered_rasters_map[f.name] = f
 
-# Sort rasters chronologically
+# Keep one image per capture (prefers 8-band harmonized SR) and sort chronologically
 all_available_rasters = sorted(
-    list(discovered_rasters_map.values()),
+    [Path(p) for p in select_sr_rasters(str(p) for p in discovered_rasters_map.values())],
     key=lambda p: (parse_date_from_filename(p.name) or "99999999", p.name),
 )
 
@@ -1720,31 +2298,64 @@ else:
                     diffs.append(abs((p_dt - peak_dt).days))
                 else:
                     diffs.append(9999)
-            default_peak_idx = int(np.argmin(diffs))
+            default_peak_idx = diffs.index(min(diffs))
         except Exception:
             default_peak_idx = 0
+
+    # Seed widget state directly (instead of index/default) so calendar clicks can drive these widgets.
+    # Values from a previous field/season that are no longer staged are dropped.
+    if st.session_state.get("peak_canopy_select") not in all_available_rasters:
+        st.session_state["peak_canopy_select"] = all_available_rasters[default_peak_idx]
+    if "classification_targets_select" in st.session_state:
+        st.session_state["classification_targets_select"] = [
+            p for p in st.session_state["classification_targets_select"] if p in all_available_rasters
+        ]
+    else:
+        default_peak = all_available_rasters[default_peak_idx]
+        st.session_state["classification_targets_select"] = (
+            [p for p in all_available_rasters if p != default_peak] or list(all_available_rasters)
+        )
 
     col_peak, col_targets = st.columns([1.3, 1.7], gap="medium")
     with col_peak:
         selected_peak_path = st.selectbox(
             "1. Peak canopy mask image (early baseline):",
             options=all_available_rasters,
-            index=default_peak_idx,
             format_func=_format_raster_display,
             help="Select the PlanetScope capture representing peak vegetative growth (typically mid-to-late July) to compute the field's early canopy mask (mean - k * SD).",
             key="peak_canopy_select",
         )
 
     with col_targets:
-        remaining_rasters = [p for p in all_available_rasters if p != selected_peak_path]
+        if len(all_available_rasters) == 1:
+            st.caption("ℹ️ **Single capture mode:** Evaluating this capture date using its own canopy mask as baseline.")
+
         selected_target_paths = st.multiselect(
             "2. Classification capture date(s) to evaluate:",
-            options=remaining_rasters,
-            default=remaining_rasters,
+            options=all_available_rasters,
             format_func=_format_raster_display,
             help="Select one or multiple capture dates to run through the 13-feature RCR machine learning classifier.",
             key="classification_targets_select",
         )
+
+    st.markdown('<div class="md-output-title">🗓️ Capture calendar</div>', unsafe_allow_html=True)
+    st.radio(
+        "Clicking a capture date in the calendar sets:",
+        options=[CAL_MODE_TARGETS, CAL_MODE_PEAK],
+        horizontal=True,
+        key="calendar_click_mode",
+    )
+    _render_capture_calendar(
+        all_available_rasters,
+        selected_peak_path,
+        selected_target_paths,
+        s2_peak_iso=pr.get("peak_date") if pr else None,
+    )
+
+# Classify/report chronologically, not in the order dates were clicked in the multiselect or calendar
+selected_target_paths = sorted(
+    selected_target_paths, key=lambda p: (parse_date_from_filename(p.name) or "", p.name)
+)
 
 c_poly_ok = pinfo is not None
 c_peak_ok = selected_peak_path is not None and Path(selected_peak_path).exists()
@@ -1932,7 +2543,7 @@ st.markdown(
     """
     <div class="md-footer">
         <div>
-            <b style="color:#13294B;">Red crown rot scouting</b> &mdash;
+            <b style="color:#13294B;">RCR Scout</b> &mdash;
             Smart Plant Pathology Lab, Department of Crop Sciences, University of Illinois Urbana-Champaign
         </div>
         <div>

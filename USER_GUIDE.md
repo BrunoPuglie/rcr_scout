@@ -1,7 +1,9 @@
-# Soybean Red Crown Rot (RCR) Scouting Platform
-### User Guide for Field Agronomists & Researchers (Zero Code Required)
+# RCR Scout — User Guide
+### Satellite mapping of red crown rot in soybean · For Field Agronomists & Researchers (Zero Code Required)
 
-Welcome to the **Soybean Red Crown Rot (RCR) Automated Field Scouting Platform**, developed by the **Smart Plant Pathology Lab** at the **University of Illinois Urbana-Champaign**.
+*Platform version 1.1.0 — see [CHANGELOG.md](CHANGELOG.md) for what's new.*
+
+Welcome to **RCR Scout**, the Soybean Red Crown Rot (RCR) automated field scouting platform developed by the **Smart Plant Pathology Lab** at the **University of Illinois Urbana-Champaign**.
 
 This application enables field agronomists, crop consultants, researchers, and growers to detect and map Red Crown Rot in commercial soybean fields using satellite imagery and machine learning, with **zero programming experience required**.
 
@@ -57,6 +59,8 @@ Google Earth Engine requires each user to have their own Google Cloud Project ID
      4. Upload that `.json` file in the platform's sidebar under *🔑 Earth Engine Access & Credentials*.
 6. In the platform's left sidebar, enter your Project ID in the **Google Earth Engine project ID** field.
 
+> **Saved accounts:** When running the platform on your own computer, your Project ID, Earth Engine key and Planet API key are remembered between sessions (stored in `%USERPROFILE%\.rcr_scout\linked_accounts.json`, outside the project folder). Use **🔄 Change** to link a different account or **🗑️ Unlink** to remove the saved one. Untick **Remember on this computer** to use a key for the current session only. Keys are never saved on the shared web version.
+
 ---
 
 ## 3. How to Launch the Platform
@@ -106,17 +110,18 @@ Google Earth Engine requires each user to have their own Google Cloud Project ID
 ### Step 3: Provide PlanetScope Imagery
 You need 8-band Surface Reflectance PlanetScope SuperDove GeoTIFFs (`PSScene` / `ortho_analytic_8b_sr`) covering the field:
 
-- **Option A: Upload Downloaded GeoTIFFs (.tif)**
+- **Option A: Upload the Planet order ZIP (.zip)**
   - If you download your images directly from [Planet Explorer](https://www.planet.com/explorer/):
-  - In sub-panel 1, upload your **early baseline GeoTIFF** (peak canopy date, typically late July).
-  - In sub-panel 2, upload your **classification GeoTIFF(s)** (around the target scouting date).
+  - Upload the `.zip` file exactly as downloaded from Planet; there's no need to unzip it. You can also drop the unzipped files.
+  - Each date in a Planet order comes with several files (`.json` and `.xml` metadata, a `udm2` cloud-mask GeoTIFF and the image itself). The platform automatically keeps only the 8-band Surface Reflectance image (`*_AnalyticMS_SR_8b_harmonized_clip.tif`) and ignores the other files.
+  - You can upload a single image (which will be evaluated using its own canopy mask) or a multi-date time series.
 - **Option B: Personal Planet API Key (Auto-Search & Order)**
   - Enter your Planet API key (found in [Planet account settings](https://www.planet.com/account/)).
   - Specify the season search window (default May 1 to October 31) and maximum cloud cover.
   - Click **"🔍 Search Planet Catalog"**. The platform displays available cloud-free scenes and highlights the dates closest to your optimal scouting recommendations.
   - Select the scenes you want and click **"⬇️ Order & download selected scenes"**.
   - Planet will clip the scenes to your exact field polygon and download them automatically.
-  - *Order in progress?* If an order takes time to clip, copy the 36-character **Order ID** and use the **"Resume or download existing Planet order"** panel anytime.
+  - *Order in progress or downloaded via web?* If an order takes time to clip, copy the 36-character **Order ID** and use the **"Resume or download existing Planet order by Order ID"** card. If the order was packaged as a `.zip` or direct rasters, it will be automatically retrieved and staged. If download links have expired (after 24–48 hours), you can upload the downloaded `.zip` or `.tif` files in Option A.
 
 ---
 
@@ -124,6 +129,8 @@ You need 8-band Surface Reflectance PlanetScope SuperDove GeoTIFFs (`PSScene` / 
 1. In **Step 4**, the platform discovers all staged rasters and assigns:
    - **Peak canopy mask image** (used for early $3\sigma$ canopy masking).
    - **Target classification dates** (one or multiple dates).
+
+   You can also make these selections in the **🗓️ Capture calendar**: choose what a click sets (**Classification dates (add / remove)** or **Peak canopy mask**), then click any highlighted capture date. Clicking a classification date again removes it.
 2. Click **"🔬 Run RCR classification on selected date(s)"**.
 3. The platform executes the calibrated RCRC v3.1 model:
    - Calculates 13 normalized within-field spectral indices and reflectance bands.

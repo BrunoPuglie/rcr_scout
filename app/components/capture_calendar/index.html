@@ -1,0 +1,66 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; }
+</style>
+<style id="rcal-style"></style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+  // Minimal Streamlit component protocol (no build step / npm needed).
+  // Python sends {html, css}; clicking a capture day reports {day, token} back.
+  function send(type, data) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*");
+  }
+
+  function reportHeight() {
+    send("streamlit:setFrameHeight", { height: Math.ceil(document.documentElement.scrollHeight) });
+  }
+
+  function pick(day) {
+    send("streamlit:setComponentValue", {
+      value: { day: day, token: Date.now() + "-" + Math.random() },
+      dataType: "json",
+    });
+  }
+
+  const root = document.getElementById("root");
+  root.addEventListener("click", function (e) {
+    const cell = e.target.closest("[data-day]");
+    if (cell) pick(cell.dataset.day);
+  });
+  root.addEventListener("keydown", function (e) {
+    const cell = e.target.closest("[data-day]");
+    if (cell && (e.key === "Enter" || e.key === " ")) {
+      e.preventDefault();
+      pick(cell.dataset.day);
+    }
+  });
+
+  let lastHtml = null;
+  window.addEventListener("message", function (event) {
+    if (!event.data || event.data.type !== "streamlit:render") return;
+    const args = event.data.args || {};
+    document.getElementById("rcal-style").textContent = args.css || "";
+    if (args.html !== lastHtml) {
+      // Keep keyboard focus on the same day across re-renders
+      const focused = document.activeElement && document.activeElement.dataset
+        ? document.activeElement.dataset.day : null;
+      root.innerHTML = args.html || "";
+      lastHtml = args.html;
+      if (focused) {
+        const again = root.querySelector('[data-day="' + focused + '"]');
+        if (again) again.focus();
+      }
+    }
+    reportHeight();
+  });
+
+  new ResizeObserver(reportHeight).observe(document.body);
+  send("streamlit:componentReady", { apiVersion: 1 });
+</script>
+</body>
+</html>

@@ -86,6 +86,7 @@ from rcr_engine import (
     plot_boundary_preview,
     plot_multi_date_comparison_grid,
     plot_phenology_curve,
+    render_planet_scene_previews,
     run_multi_date_rcr_classification,
     search_planet_catalog_for_window,
     submit_and_download_planet_clip_order,
@@ -234,11 +235,20 @@ def main():
                 max_cloud_cover=float(req.get("max_cloud_cover", 0.20)),
             )
 
+            def _clean_value(v):
+                if hasattr(v, "strftime"):
+                    return v.strftime("%Y-%m-%d")
+                if isinstance(v, pd.Timedelta):
+                    return str(v)
+                if isinstance(v, float) and pd.isna(v):
+                    return None  # missing optional Planet metrics (e.g. clear_percent) become JSON null
+                return v
+
             def _clean_scene(s):
                 if not s:
                     return None
                 return {
-                    k: (v.strftime("%Y-%m-%d") if hasattr(v, "strftime") else str(v) if isinstance(v, pd.Timedelta) else v)
+                    k: _clean_value(v)
                     for k, v in s.items()
                     if k not in ("date_dt", "diff_peak", "diff_target", "diff_before", "diff_after")
                 }
@@ -255,6 +265,20 @@ def main():
                 "after_target": _clean_scene(sr.get("after_target")),
                 "search_window": sr.get("search_window", ""),
                 "total_scenes_found": sr.get("total_scenes_found", len(all_scenes_clean)),
+            }
+
+        elif action == "preview_planet_scenes":
+            poly_gdf = _load_geojson_pure(req["boundary_geojson_path"])
+            previews = render_planet_scene_previews(
+                api_key=req["api_key"],
+                poly_gdf=poly_gdf,
+                scene_ids=list(req["scene_ids"]),
+                out_dir=out_dir,
+                max_scenes=int(req.get("max_scenes", 12)),
+            )
+            resp = {
+                "status": "ok",
+                "previews": previews,
             }
 
         elif action == "order_planet":
@@ -304,7 +328,7 @@ def main():
                     mismatches = []
                     for fpath_str in dl_files:
                         fpath = Path(fpath_str)
-                        if fpath.exists() and fpath.suffix.lower() == ".tif":
+                        if fpath.exists() and fpath.suffix.lower() in (".tif", ".tiff"):
                             with rasterio.open(fpath) as src:
                                 poly_proj = poly_gdf.to_crs(src.crs)
                                 poly_geom = poly_proj.geometry.unary_union
