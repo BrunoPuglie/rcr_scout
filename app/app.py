@@ -33,6 +33,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 from PIL import Image
 import streamlit as st
+import streamlit.components.v1 as components
 
 from planet_files import describe_planet_file, extract_sr_rasters_from_zip, is_planet_sr_raster, select_sr_rasters
 
@@ -1884,7 +1885,7 @@ with tab_api:
         "If an order was previously submitted or timed out while Planet was clipping scenes in the background, "
         "enter the **Planet Order ID** below to check its status or download the completed GeoTIFFs without spending additional quota:"
     )
-    res_c1, res_c2, res_c3 = st.columns([2.0, 1.0, 1.2])
+    res_c1, res_c2 = st.columns([2.0, 1.0])
     with res_c1:
         saved_oid_file = SAT_BASE_DIR / active_fid / str(season_input) / "last_planet_order_id.txt"
         saved_oid = ""
@@ -1910,14 +1911,11 @@ with tab_api:
             "🔎 Check status",
             help="Instantly checks whether Planet has finished clipping without waiting.",
         )
-    with res_c3:
-        st.write("")
-        st.write("")
-        resume_order_btn = st.button(
-            "📥 Download order by ID",
-            type="primary",
-            help="Downloads clipped GeoTIFFs if ready, or polls until clipping completes.",
-        )
+    resume_order_btn = st.button(
+        "📥 Download order by ID",
+        type="primary",
+        help="Downloads clipped GeoTIFFs if ready, or polls until clipping completes.",
+    )
 
     if check_status_btn:
         if not planet_api_key:
@@ -2001,13 +1999,41 @@ def _format_raster_display(p: Path) -> str:
     return f"📅 {iso} · {p.name}"
 
 
+_capture_calendar_component = components.declare_component(
+    "capture_calendar", path=str(APP_DIR / "components" / "capture_calendar")
+)
+CAL_MODE_TARGETS = "Classification dates (add / remove)"
+CAL_MODE_PEAK = "Peak canopy mask"
+
+
+def _sort_rasters_by_date(paths: List[Path]) -> List[Path]:
+    return sorted(paths, key=lambda p: (parse_date_from_filename(p.name) or "99999999", p.name))
+
+
+def _on_capture_calendar_click() -> None:
+    """Apply a calendar day click to the Step 4 peak / classification selectors."""
+    click = st.session_state.get("capture_calendar_click") or {}
+    day_paths = [Path(p) for p in st.session_state.get("_capture_calendar_days", {}).get(click.get("day"), [])]
+    if not day_paths:
+        return
+    if st.session_state.get("calendar_click_mode") == CAL_MODE_PEAK:
+        st.session_state["peak_canopy_select"] = day_paths[0]
+        return
+    current = list(st.session_state.get("classification_targets_select", []))
+    if any(p in current for p in day_paths):
+        current = [p for p in current if p not in day_paths]
+    else:
+        current.extend(day_paths)
+    st.session_state["classification_targets_select"] = _sort_rasters_by_date(current)
+
+
 def _render_capture_calendar(
     rasters: List[Path],
     peak_path: Optional[Path],
     target_paths: List[Path],
     s2_peak_iso: Optional[str] = None,
 ) -> None:
-    """Render a read-only month calendar highlighting capture dates and their roles in Step 4."""
+    """Render a month calendar of capture dates and their Step 4 roles; clicking a capture day edits the roles."""
     captures_by_day: Dict[date, List[Path]] = {}
     for p in rasters:
         d_str = parse_date_from_filename(p.name)
@@ -2048,8 +2074,11 @@ def _render_capture_calendar(
                 continue
             classes = ["rcal-day"]
             tips = [day.isoformat()]
+            extra_attrs = ""
             day_captures = captures_by_day.get(day, [])
             if day_captures:
+                classes.append("rcal-click")
+                extra_attrs = f' data-day="{day.isoformat()}" role="button" tabindex="0"'
                 is_peak = peak_day == day
                 is_target = any(p.name in target_names for p in day_captures)
                 if is_peak and is_target:
@@ -2072,7 +2101,7 @@ def _render_capture_calendar(
                 tips.append("Sentinel-2 NDVI peak")
             class_attr = " ".join(classes)
             tip_attr = "&#10;".join(html.escape(t) for t in tips)
-            cells += f'<div class="{class_attr}" title="{tip_attr}">{day.day}</div>'
+            cells += f'<div class="{class_attr}" title="{tip_attr}"{extra_attrs}>{day.day}</div>'
         month_html.append(
             f'<div class="rcal-month"><div class="rcal-mtitle">{calendar.month_name[m]} {y}</div>'
             f'<div class="rcal-grid">{cells}</div></div>'
@@ -2087,8 +2116,12 @@ def _render_capture_calendar(
         + ('<span><i class="rcal-sw rcal-s2dot"></i>Sentinel-2 NDVI peak</span>' if s2_day else "")
         + "</div>"
     )
+    # The calendar renders inside a component iframe, so it needs its own copy of the theme tokens and font
     style = (
-        "<style>"
+        "@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap');"
+        ":root{--illini-blue:#13294B;--illini-blue-accent:#1D58A7;--illini-blue-light:#E8F0FE;"
+        "--illini-orange:#FF5F05;--md-surface:#FFFFFF;--md-outline:#DCE2EC;--md-text-secondary:#4A5B75;}"
+        "body{font-family:'Montserrat',-apple-system,BlinkMacSystemFont,sans-serif;}"
         ".rcal-wrap{background:var(--md-surface);border:1px solid var(--md-outline);border-radius:12px;"
         "padding:0.9rem 1rem 0.7rem;margin:0.4rem 0 0.9rem;}"
         ".rcal-months{display:flex;flex-wrap:wrap;gap:1.1rem 1.6rem;}"
@@ -2112,12 +2145,22 @@ def _render_capture_calendar(
         ".rcal-sw{display:inline-block;width:0.8rem;height:0.8rem;border-radius:50%;}"
         ".rcal-sw.rcal-both{box-shadow:0 0 0 1.5px var(--md-surface),0 0 0 3px var(--illini-blue);}"
         ".rcal-s2dot{width:0.45rem;height:0.45rem;background:#2E9E5B;}"
-        "</style>"
+        ".rcal-click{cursor:pointer;transition:transform 0.12s ease;}"
+        ".rcal-click:hover{transform:scale(1.14);}"
+        ".rcal-click:focus-visible{outline:2px solid var(--illini-orange);outline-offset:2px;}"
+        ".rcal-hint{margin-top:0.35rem;font-size:0.7rem;color:var(--md-text-secondary);font-style:italic;}"
     )
     months_attr = "".join(month_html)
-    st.markdown(
-        f'{style}<div class="rcal-wrap"><div class="rcal-months">{months_attr}</div>{legend}</div>',
-        unsafe_allow_html=True,
+    hint = '<div class="rcal-hint">Click a highlighted date to change its role.</div>'
+    st.session_state["_capture_calendar_days"] = {
+        d.isoformat(): [str(p) for p in paths] for d, paths in captures_by_day.items()
+    }
+    _capture_calendar_component(
+        html=f'<div class="rcal-wrap"><div class="rcal-months">{months_attr}</div>{legend}{hint}</div>',
+        css=style,
+        key="capture_calendar_click",
+        on_change=_on_capture_calendar_click,
+        default=None,
     )
 
 discovered_rasters_map: Dict[str, Path] = {}
@@ -2229,12 +2272,25 @@ else:
         except Exception:
             default_peak_idx = 0
 
+    # Seed widget state directly (instead of index/default) so calendar clicks can drive these widgets.
+    # Values from a previous field/season that are no longer staged are dropped.
+    if st.session_state.get("peak_canopy_select") not in all_available_rasters:
+        st.session_state["peak_canopy_select"] = all_available_rasters[default_peak_idx]
+    if "classification_targets_select" in st.session_state:
+        st.session_state["classification_targets_select"] = [
+            p for p in st.session_state["classification_targets_select"] if p in all_available_rasters
+        ]
+    else:
+        default_peak = all_available_rasters[default_peak_idx]
+        st.session_state["classification_targets_select"] = (
+            [p for p in all_available_rasters if p != default_peak] or list(all_available_rasters)
+        )
+
     col_peak, col_targets = st.columns([1.3, 1.7], gap="medium")
     with col_peak:
         selected_peak_path = st.selectbox(
             "1. Peak canopy mask image (early baseline):",
             options=all_available_rasters,
-            index=default_peak_idx,
             format_func=_format_raster_display,
             help="Select the PlanetScope capture representing peak vegetative growth (typically mid-to-late July) to compute the field's early canopy mask (mean - k * SD).",
             key="peak_canopy_select",
@@ -2242,31 +2298,34 @@ else:
 
     with col_targets:
         if len(all_available_rasters) == 1:
-            target_options = all_available_rasters
-            target_default = all_available_rasters
             st.caption("ℹ️ **Single capture mode:** Evaluating this capture date using its own canopy mask as baseline.")
-        else:
-            target_options = all_available_rasters
-            target_default = [p for p in all_available_rasters if p != selected_peak_path]
-            if not target_default:
-                target_default = all_available_rasters
 
         selected_target_paths = st.multiselect(
             "2. Classification capture date(s) to evaluate:",
-            options=target_options,
-            default=target_default,
+            options=all_available_rasters,
             format_func=_format_raster_display,
             help="Select one or multiple capture dates to run through the 13-feature RCR machine learning classifier.",
             key="classification_targets_select",
         )
 
     st.markdown('<div class="md-output-title">🗓️ Capture calendar</div>', unsafe_allow_html=True)
+    st.radio(
+        "Clicking a capture date in the calendar sets:",
+        options=[CAL_MODE_TARGETS, CAL_MODE_PEAK],
+        horizontal=True,
+        key="calendar_click_mode",
+    )
     _render_capture_calendar(
         all_available_rasters,
         selected_peak_path,
         selected_target_paths,
         s2_peak_iso=pr.get("peak_date") if pr else None,
     )
+
+# Classify/report chronologically, not in the order dates were clicked in the multiselect or calendar
+selected_target_paths = sorted(
+    selected_target_paths, key=lambda p: (parse_date_from_filename(p.name) or "", p.name)
+)
 
 c_poly_ok = pinfo is not None
 c_peak_ok = selected_peak_path is not None and Path(selected_peak_path).exists()

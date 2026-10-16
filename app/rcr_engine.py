@@ -1988,6 +1988,9 @@ def run_multi_date_rcr_classification(
     date_results = []
     exported_files = []
 
+    # Process (and therefore report/plot) captures chronologically, regardless of selection order (YYYYMMDD sorts lexically)
+    target_captures = sorted(target_captures, key=lambda c: str(c[1]))
+
     for role_label, target_date_str, target_tif_path in target_captures:
         target_img, out_meta = _clip_raster_to_polygon(target_tif_path, poly_gdf)
         if target_img.shape[0] < 8:
@@ -2182,10 +2185,25 @@ def plot_multi_date_comparison_grid(run_res: Dict, field_id: str, season: str) -
     from matplotlib.lines import Line2D
     from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-    results = run_res["date_results"]
+    results = sorted(run_res["date_results"], key=lambda r: str(r.get("capture_date", "")))
     n_cols = len(results)
-    fig_w = max(6.4, 5.2 * n_cols)
-    fig = Figure(figsize=(fig_w, 8.5), dpi=500, facecolor="#FFFFFF")
+
+    # Size each map cell to the field's own (padded) aspect ratio so the equal-aspect maps fill their
+    # cells instead of being letterboxed inside a fixed-size figure (wide fields -> vertical gaps,
+    # tall fields -> horizontal gaps).
+    h_over_w = 0.75
+    if results[0].get("_bounds") is not None:
+        vx0, vy0, vx1, vy1 = _expand_view_bounds(results[0]["_bounds"], pad_frac=0.10)
+        h_over_w = (vy1 - vy0) / max(1e-6, vx1 - vx0)
+    h_over_w = min(2.8, max(0.35, h_over_w))
+    map_long_in = 4.4
+    map_w = map_long_in if h_over_w <= 1.0 else map_long_in / h_over_w
+    map_h = map_w * h_over_w
+    col_w = max(3.4, map_w + 0.75)  # + colorbar & tick labels; floor keeps titles/legend from clipping
+    header_in = 0.8
+    fig_w = max(6.4, col_w * n_cols)
+    fig_h = header_in + (0.35 + map_h) + (0.55 + map_h + 0.4)  # row titles, 2-line title + legend
+    fig = Figure(figsize=(fig_w, fig_h), dpi=500, facecolor="#FFFFFF")
     axes = fig.subplots(2, n_cols, squeeze=False)
 
     # Transparent NaN background so the Google Satellite basemap shows clearly outside the canopy mask
@@ -2338,17 +2356,17 @@ def plot_multi_date_comparison_grid(run_res: Dict, field_id: str, season: str) -
     sigma_val = float(results[0].get("mask_sigma_used", run_res.get("mask_sigma", 3.0)))
 
     fig.text(
-        0.03, 0.955,
+        0.03, 1.0 - 0.38 / fig_h,
         f"Red crown rot (RCR) spatial assessment - Field {field_id} ({season})",
         fontsize=10.5, fontweight="600", color=ILLINI_BLUE
     )
     fig.text(
-        0.03, 0.924,
+        0.03, 1.0 - 0.65 / fig_h,
         f"Early canopy mask baseline: {early_iso} (mean - {sigma_val:g} SD)   |   Classification threshold: t = {thresh_val:.2f}   |   Model: RCRC v3.1",
         fontsize=8.3, color="#4A5B75"
     )
 
-    fig.tight_layout(rect=[0.01, 0.03, 0.99, 0.89])
+    fig.tight_layout(rect=[0.01, 0.1 / fig_h, 0.99, 1.0 - header_in / fig_h], w_pad=1.2, h_pad=0.8)
     return fig
 
 
