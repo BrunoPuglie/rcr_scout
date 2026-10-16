@@ -364,6 +364,20 @@ def render_crisp_figure(
 FAVICON_PATH = APP_DIR / "assets" / "app_icon.png"
 fav_icon = Image.open(FAVICON_PATH) if FAVICON_PATH.exists() else "🛰️"
 
+
+def app_icon_html(size_px: int, extra_style: str = "") -> str:
+    """Returns an inline <img> tag with the app icon (empty string if missing)."""
+    if not FAVICON_PATH.exists():
+        return ""
+    import base64
+
+    b64 = base64.b64encode(FAVICON_PATH.read_bytes()).decode("ascii")
+    return (
+        f'<img src="data:image/png;base64,{b64}" alt="RCR Scout icon" '
+        f'style="width:{size_px}px; height:{size_px}px; flex-shrink:0; {extra_style}" />'
+    )
+
+
 st.set_page_config(
     page_title="Red crown rot scouting",
     page_icon=fav_icon,
@@ -425,6 +439,12 @@ st.markdown(
         justify-content: space-between;
         align-items: center;
         gap: 1rem;
+    }
+
+    .md-hero-brand {
+        display: flex;
+        align-items: center;
+        gap: 1.1rem;
     }
 
     .md-hero-title {
@@ -660,14 +680,17 @@ st.markdown(
 
 # Material Hero Header (Solid Illini Blue Fill)
 st.markdown(
-    """
+    f"""
     <div class="md-hero-card">
-        <div>
-            <div class="md-hero-title">Red crown rot scouting</div>
-            <p class="md-hero-subtitle">
-                Upload field boundary &rarr; Select soybean season &amp; Sentinel-2 trajectory &rarr;
-                Stage PlanetScope imagery &rarr; Generate RCR probability &amp; classification maps
-            </p>
+        <div class="md-hero-brand">
+            {app_icon_html(72)}
+            <div>
+                <div class="md-hero-title">Red crown rot scouting</div>
+                <p class="md-hero-subtitle">
+                    Upload field boundary &rarr; Select soybean season &amp; Sentinel-2 trajectory &rarr;
+                    Stage PlanetScope imagery &rarr; Generate RCR probability &amp; classification maps
+                </p>
+            </div>
         </div>
         <div class="md-lab-badge">
             <div style="font-weight:700; font-size:0.92rem; color:#FFFFFF; margin-bottom:2px;">
@@ -713,10 +736,13 @@ if "linked_accounts_loaded" not in st.session_state:
 
 with st.sidebar:
     st.markdown(
-        """
-        <div style="background-color:#13294B; color:white; padding:0.9rem 1rem; border-radius:10px; border-bottom:4px solid #FF5F05; margin-bottom:1rem;">
-            <div style="font-weight:700; font-size:1.0rem;">Smart Plant Pathology Lab</div>
-            <div style="font-size:0.8rem; color:#CBD5E1;">University of Illinois Urbana-Champaign</div>
+        f"""
+        <div style="background-color:#13294B; color:white; padding:0.9rem 1rem; border-radius:10px; border-bottom:4px solid #FF5F05; margin-bottom:1rem; display:flex; align-items:center; gap:0.75rem;">
+            {app_icon_html(40)}
+            <div>
+                <div style="font-weight:700; font-size:1.0rem;">Smart Plant Pathology Lab</div>
+                <div style="font-size:0.8rem; color:#CBD5E1;">University of Illinois Urbana-Champaign</div>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
