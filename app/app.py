@@ -1773,7 +1773,7 @@ with tab_api:
 
         # Visual quality check: field-cropped true-colour previews of the selected scenes.
         # Previews are fetched on demand only and cached per (field boundary, scene) so reruns never refetch.
-        st.markdown('<div class="md-output-title">👁️ Visual quality check</div>', unsafe_allow_html=True)
+        st.markdown('<div class="md-output-title">🔍 Visual quality check</div>', unsafe_allow_html=True)
         preview_store = st.session_state["planet_scene_previews"]
         preview_sig = st.session_state.get("poly_sig", "")
         scenes_by_id = {s["scene_id"]: s for s in all_scenes}
@@ -1783,7 +1783,7 @@ with tab_api:
         prev_c1, prev_c2 = st.columns([1.6, 2.4])
         with prev_c1:
             preview_btn = st.button(
-                f"👁️ Preview {len(ids_to_preview)} selected scene(s)",
+                f"🔍 Preview {len(ids_to_preview)} selected scene(s)",
                 disabled=(not ids_to_preview or not planet_api_key),
                 key="planet_preview_btn",
             )
@@ -2124,9 +2124,10 @@ def _render_capture_calendar(
         "body{font-family:'Montserrat',-apple-system,BlinkMacSystemFont,sans-serif;}"
         ".rcal-wrap{background:var(--md-surface);border:1px solid var(--md-outline);border-radius:12px;"
         "padding:0.9rem 1rem 0.7rem;margin:0.4rem 0 0.9rem;}"
-        ".rcal-months{display:flex;flex-wrap:wrap;gap:1.1rem 1.6rem;}"
+        ".rcal-months{display:flex;flex-wrap:wrap;justify-content:center;gap:1.1rem 1.6rem;}"
         ".rcal-month{flex:0 0 auto;}"
-        ".rcal-mtitle{font-weight:700;font-size:0.86rem;color:var(--illini-blue);margin-bottom:0.3rem;}"
+        ".rcal-mtitle{font-weight:700;font-size:0.86rem;color:var(--illini-blue);margin-bottom:0.3rem;"
+        "text-align:center;}"
         ".rcal-grid{display:grid;grid-template-columns:repeat(7,1.9rem);gap:3px;}"
         ".rcal-dow{font-size:0.66rem;font-weight:600;color:var(--md-text-secondary);text-align:center;}"
         ".rcal-day{height:1.9rem;line-height:1.9rem;text-align:center;font-size:0.74rem;border-radius:50%;"
@@ -2139,7 +2140,7 @@ def _render_capture_calendar(
         "box-shadow:0 0 0 2px var(--md-surface),0 0 0 4px var(--illini-blue);}"
         ".rcal-s2::after{content:'';position:absolute;left:50%;bottom:1px;width:5px;height:5px;margin-left:-2.5px;"
         "border-radius:50%;background:#2E9E5B;}"
-        ".rcal-legend{display:flex;flex-wrap:wrap;gap:0.4rem 1.1rem;margin-top:0.7rem;font-size:0.74rem;"
+        ".rcal-legend{display:flex;flex-wrap:wrap;justify-content:center;gap:0.4rem 1.1rem;margin-top:0.7rem;font-size:0.74rem;"
         "color:var(--md-text-secondary);}"
         ".rcal-legend span{display:inline-flex;align-items:center;gap:0.35rem;}"
         ".rcal-sw{display:inline-block;width:0.8rem;height:0.8rem;border-radius:50%;}"
@@ -2148,7 +2149,7 @@ def _render_capture_calendar(
         ".rcal-click{cursor:pointer;transition:transform 0.12s ease;}"
         ".rcal-click:hover{transform:scale(1.14);}"
         ".rcal-click:focus-visible{outline:2px solid var(--illini-orange);outline-offset:2px;}"
-        ".rcal-hint{margin-top:0.35rem;font-size:0.7rem;color:var(--md-text-secondary);font-style:italic;}"
+        ".rcal-hint{margin-top:0.35rem;text-align:center;font-size:0.7rem;color:var(--md-text-secondary);font-style:italic;}"
     )
     months_attr = "".join(month_html)
     hint = '<div class="rcal-hint">Click a highlighted date to change its role.</div>'
