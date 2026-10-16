@@ -441,10 +441,12 @@ st.markdown(
         gap: 1rem;
     }
 
-    .md-hero-brand {
+    .md-hero-aside {
         display: flex;
-        align-items: center;
+        align-items: flex-end;
+        align-self: flex-end;
         gap: 1.1rem;
+        margin-left: auto;
     }
 
     .md-hero-title {
@@ -682,16 +684,14 @@ st.markdown(
 st.markdown(
     f"""
     <div class="md-hero-card">
-        <div class="md-hero-brand">
-            {app_icon_html(72)}
-            <div>
-                <div class="md-hero-title">Red crown rot scouting</div>
-                <p class="md-hero-subtitle">
-                    Upload field boundary &rarr; Select soybean season &amp; Sentinel-2 trajectory &rarr;
-                    Stage PlanetScope imagery &rarr; Generate RCR probability &amp; classification maps
-                </p>
-            </div>
+        <div>
+            <div class="md-hero-title">Red crown rot scouting</div>
+            <p class="md-hero-subtitle">
+                Upload field boundary &rarr; Select soybean season &amp; Sentinel-2 trajectory &rarr;
+                Stage PlanetScope imagery &rarr; Generate RCR probability &amp; classification maps
+            </p>
         </div>
+        <div class="md-hero-aside">
         <div class="md-lab-badge">
             <div style="font-weight:700; font-size:0.92rem; color:#FFFFFF; margin-bottom:2px;">
                 🏛️ Smart Plant Pathology Lab
@@ -703,6 +703,8 @@ st.markdown(
                 📧 <b>Dr. Boris X. Camiletti:</b> <a href="mailto:bxc@illinois.edu">bxc@illinois.edu</a><br/>
                 📧 <b>Dr. Bruno D. Pugliese:</b> <a href="mailto:brunodp@illinois.edu">brunodp@illinois.edu</a>
             </div>
+        </div>
+        {app_icon_html(72)}
         </div>
     </div>
     """,
