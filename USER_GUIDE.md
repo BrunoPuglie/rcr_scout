@@ -57,6 +57,8 @@ Google Earth Engine requires each user to have their own Google Cloud Project ID
      4. Upload that `.json` file in the platform's sidebar under *🔑 Earth Engine Access & Credentials*.
 6. In the platform's left sidebar, enter your Project ID in the **Google Earth Engine project ID** field.
 
+> **Saved accounts:** When running the platform on your own computer, your Project ID, Earth Engine key and Planet API key are remembered between sessions (stored in `%USERPROFILE%\.rcr_scout\linked_accounts.json`, outside the project folder). Use **🔄 Change** to link a different account or **🗑️ Unlink** to remove the saved one. Untick **Remember on this computer** to use a key for the current session only. Keys are never saved on the shared web version.
+
 ---
 
 ## 3. How to Launch the Platform

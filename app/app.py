@@ -100,6 +100,74 @@ def get_session_workdir() -> Path:
     return Path(st.session_state["session_workdir"])
 
 
+# ------------------------------------------------------------------------------
+# Linked accounts store (GEE project / credentials and Planet API key)
+# ------------------------------------------------------------------------------
+# Saved in the user's home folder (outside the repo / OneDrive sync), so linked
+# accounts survive app restarts. Disabled on shared cloud hosts, where a file on
+# the server would be visible to every visitor of the app.
+
+ACCOUNTS_STORE_PATH = Path.home() / ".rcr_scout" / "linked_accounts.json"
+
+
+def _is_shared_cloud_host() -> bool:
+    if os.environ.get("RCR_DISABLE_ACCOUNT_STORE", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    # Streamlit Community Cloud mounts apps under /mount/src
+    return Path("/mount/src").exists() or bool(os.environ.get("STREAMLIT_SHARING_MODE"))
+
+
+ACCOUNT_STORE_ENABLED = not _is_shared_cloud_host()
+
+
+def load_linked_accounts() -> Dict[str, str]:
+    if not ACCOUNT_STORE_ENABLED or not ACCOUNTS_STORE_PATH.exists():
+        return {}
+    try:
+        data = json.loads(ACCOUNTS_STORE_PATH.read_text(encoding="utf-8"))
+        return {k: str(v) for k, v in data.items() if isinstance(v, str)} if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def update_linked_accounts(**changes: Optional[str]) -> None:
+    """Sets (str value) or removes (None / empty value) entries in the local store."""
+    if not ACCOUNT_STORE_ENABLED:
+        return
+    data = load_linked_accounts()
+    for k, v in changes.items():
+        if v:
+            data[k] = v
+        else:
+            data.pop(k, None)
+    try:
+        ACCOUNTS_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if data:
+            ACCOUNTS_STORE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            try:
+                os.chmod(ACCOUNTS_STORE_PATH, 0o600)
+            except Exception:
+                pass
+        elif ACCOUNTS_STORE_PATH.exists():
+            ACCOUNTS_STORE_PATH.unlink()
+    except Exception as exc:
+        st.warning(f"Could not save linked accounts to {ACCOUNTS_STORE_PATH}: {exc}")
+
+
+def describe_ee_credentials(cred: str) -> str:
+    """Short, non-secret label for a GEE credential string."""
+    try:
+        data = json.loads(cred)
+        if isinstance(data, dict):
+            if data.get("client_email"):
+                return f"Service account `{data['client_email']}`"
+            if data.get("refresh_token"):
+                return "Earth Engine user token"
+    except Exception:
+        pass
+    return "Custom Earth Engine credentials"
+
+
 def get_library_boundary_files() -> Dict[str, Path]:
     """Finds all available pre-loaded field boundary files in workspace/field_boundaries and project folders."""
     search_dirs = [
@@ -622,6 +690,19 @@ for key, default in [
     if key not in st.session_state:
         st.session_state[key] = default
 
+# Restore linked accounts saved on this computer (once per browser session)
+if "linked_accounts_loaded" not in st.session_state:
+    _saved_accounts = load_linked_accounts()
+    if _saved_accounts.get("gee_project"):
+        st.session_state["gee_project"] = _saved_accounts["gee_project"]
+    if _saved_accounts.get("ee_credentials"):
+        st.session_state["custom_ee_credentials"] = _saved_accounts["ee_credentials"]
+        st.session_state["custom_ee_saved"] = True
+    if _saved_accounts.get("planet_api_key"):
+        st.session_state["planet_api_key"] = _saved_accounts["planet_api_key"]
+        st.session_state["planet_key_saved"] = True
+    st.session_state["linked_accounts_loaded"] = True
+
 with st.sidebar:
     st.markdown(
         """
@@ -638,6 +719,8 @@ with st.sidebar:
         placeholder="e.g. ee-yourusername or gcp-project-id",
         help="Required for Step 2 Sentinel-2 phenology curve. Enter your personal GEE Project ID (e.g. 'ee-username'). Can be left blank if you already configured a default project via 'earthengine set_project' or if you skip Step 2.",
     )
+    if "gee_project" in st.session_state and gee_project_raw.strip() != st.session_state["gee_project"]:
+        update_linked_accounts(gee_project=gee_project_raw.strip())
     st.session_state["gee_project"] = gee_project_raw.strip()
     gee_project = st.session_state["gee_project"]
 
@@ -687,32 +770,63 @@ with st.sidebar:
                 """
             )
 
-        custom_cred_file = st.file_uploader(
-            "Upload Service Account key (.json):",
-            type=["json"],
-            help="Upload a Google Cloud Service Account JSON key with Earth Engine permissions.",
-            key="custom_ee_file",
-        )
-        custom_cred_text = st.text_area(
-            "Or paste credentials JSON / Token:",
-            value=st.session_state.get("custom_ee_credentials", ""),
-            placeholder='{"redirect_uri": ...} or {"type": "service_account", ...}',
-            help="Paste your Earth Engine token or service account JSON string here.",
-            key="custom_ee_text",
-            height=90,
-        )
-        resolved_custom_cred = ""
-        if custom_cred_file is not None:
-            try:
-                resolved_custom_cred = custom_cred_file.getvalue().decode("utf-8")
-            except Exception:
-                pass
-        elif custom_cred_text.strip():
-            resolved_custom_cred = custom_cred_text.strip()
+        linked_ee_cred = st.session_state.get("custom_ee_credentials", "")
+        if linked_ee_cred and not st.session_state.get("ee_cred_editing"):
+            saved_note = "saved on this computer" if st.session_state.get("custom_ee_saved") else "this session only"
+            st.success(f"✅ Linked: {describe_ee_credentials(linked_ee_cred)} ({saved_note})")
+            ee_b1, ee_b2 = st.columns(2)
+            if ee_b1.button("🔄 Change", key="ee_cred_change_btn", use_container_width=True):
+                st.session_state["ee_cred_editing"] = True
+                st.rerun()
+            if ee_b2.button("🗑️ Unlink", key="ee_cred_unlink_btn", use_container_width=True):
+                st.session_state["custom_ee_credentials"] = ""
+                st.session_state["custom_ee_saved"] = False
+                update_linked_accounts(ee_credentials=None)
+                st.rerun()
+        else:
+            # Versioned widget keys so a previous upload doesn't auto-fill the form after "Change"
+            ee_form_ver = st.session_state.get("ee_cred_form_ver", 0)
+            custom_cred_file = st.file_uploader(
+                "Upload Service Account key (.json):",
+                type=["json"],
+                help="Upload a Google Cloud Service Account JSON key with Earth Engine permissions.",
+                key=f"custom_ee_file_{ee_form_ver}",
+            )
+            custom_cred_text = st.text_area(
+                "Or paste credentials JSON / Token:",
+                placeholder='{"redirect_uri": ...} or {"type": "service_account", ...}',
+                help="Paste your Earth Engine token or service account JSON string here.",
+                key=f"custom_ee_text_{ee_form_ver}",
+                height=90,
+            )
+            remember_ee = st.checkbox(
+                "Remember on this computer",
+                value=ACCOUNT_STORE_ENABLED,
+                disabled=not ACCOUNT_STORE_ENABLED,
+                key=f"custom_ee_remember_{ee_form_ver}",
+                help=f"Saves the credentials to {ACCOUNTS_STORE_PATH} so you don't need to link them again."
+                if ACCOUNT_STORE_ENABLED
+                else "Not available on the shared web version of the platform.",
+            )
+            resolved_custom_cred = ""
+            if custom_cred_file is not None:
+                try:
+                    resolved_custom_cred = custom_cred_file.getvalue().decode("utf-8")
+                except Exception:
+                    pass
+            elif custom_cred_text.strip():
+                resolved_custom_cred = custom_cred_text.strip()
 
-        if resolved_custom_cred:
-            st.session_state["custom_ee_credentials"] = resolved_custom_cred
-            st.caption("✅ Custom Earth Engine credentials loaded for this session.")
+            if resolved_custom_cred:
+                st.session_state["custom_ee_credentials"] = resolved_custom_cred
+                st.session_state["custom_ee_saved"] = bool(remember_ee and ACCOUNT_STORE_ENABLED)
+                update_linked_accounts(ee_credentials=resolved_custom_cred if remember_ee else None)
+                st.session_state["ee_cred_editing"] = False
+                st.session_state["ee_cred_form_ver"] = ee_form_ver + 1
+                st.rerun()
+            elif linked_ee_cred and st.button("Cancel", key="ee_cred_cancel_btn"):
+                st.session_state["ee_cred_editing"] = False
+                st.rerun()
 
         st.markdown(
             "<small style='color:#64748B;'>New to Earth Engine? Register free at "
@@ -1072,7 +1186,44 @@ run_pheno_btn = st.button(
 if pinfo is None:
     st.caption("ℹ️ Please upload your field boundary polygon in **Step 1** to enable Sentinel-2 extraction.")
 
-if run_pheno_btn and pinfo is not None:
+def _has_gee_access() -> bool:
+    """True if any Earth Engine authentication source is available to the worker."""
+    if st.session_state.get("custom_ee_credentials"):
+        return True
+    env_keys = ["EARTHENGINE_TOKEN", "EARTHENGINE_CREDENTIALS"]
+    if any(os.environ.get(k) for k in env_keys):
+        return True
+    if os.environ.get("EARTHENGINE_SERVICE_ACCOUNT") and os.environ.get("EARTHENGINE_PRIVATE_KEY"):
+        return True
+    try:
+        if hasattr(st, "secrets"):
+            if any(k in st.secrets for k in env_keys):
+                return True
+            if "EARTHENGINE_SERVICE_ACCOUNT" in st.secrets and "EARTHENGINE_PRIVATE_KEY" in st.secrets:
+                return True
+    except Exception:
+        pass
+    # Local authorization via `earthengine authenticate` / authenticate_earth_engine.bat
+    return (Path.home() / ".config" / "earthengine" / "credentials").exists()
+
+
+_pheno_cache_csv = (
+    WORKSPACE_DIR / "outputs" / "reports" / f"{pinfo['field_id']}_{int(season_input)}_phenology_curve.csv"
+    if pinfo is not None
+    else None
+)
+_pheno_cache_ok = bool(use_cached_pheno and _pheno_cache_csv is not None and _pheno_cache_csv.exists())
+
+if run_pheno_btn and pinfo is not None and not _has_gee_access() and not _pheno_cache_ok:
+    st.error(
+        "⚠️ **Step 2 could not run: no Google Earth Engine account is linked.**\n\n"
+        "The Sentinel-2 analysis needs access to Google Earth Engine. You can:\n"
+        "1. **Link your account**: open the left sidebar → **🔑 Earth Engine Access & Credentials**, "
+        "enter your Project ID and upload your Service Account key (`.json`).\n"
+        "2. **Skip Step 2**: if you already have PlanetScope imagery, go directly to **Step 3 (Stage Imagery)**.\n"
+        "3. **No account yet?** Register for free at [code.earthengine.google.com](https://code.earthengine.google.com)."
+    )
+elif run_pheno_btn and pinfo is not None:
     with st.spinner(f"Extracting Sentinel-2 NDVI season progress trajectory for {pinfo['field_id']} ({season_input})..."):
         try:
             pheno_res = run_worker({
@@ -1336,8 +1487,7 @@ with tab_api:
     )
     api_c1, api_c2, api_c3 = st.columns([1.6, 1.0, 1.0])
     with api_c1:
-        default_pl_key = st.session_state.get("planet_api_key", "")
-        if not default_pl_key:
+        if not st.session_state.get("planet_api_key") and not st.session_state.get("planet_key_unlinked"):
             default_pl_key = os.environ.get("PL_API_KEY") or os.environ.get("PLANET_API_KEY") or ""
             if not default_pl_key:
                 try:
@@ -1348,19 +1498,51 @@ with tab_api:
             if default_pl_key:
                 st.session_state["planet_api_key"] = default_pl_key
 
-        if "planet_api_key_input" not in st.session_state or (default_pl_key and not st.session_state.get("planet_api_key_input")):
-            st.session_state["planet_api_key_input"] = default_pl_key
-
-        planet_api_key_raw = st.text_input(
-            "Personal Planet API key:",
-            key="planet_api_key_input",
-            type="password",
-            placeholder="Paste your PL_API_KEY here...",
-            help="Found in your Planet account settings -> API key. Never stored on disk.",
-        )
-        planet_api_key = str(planet_api_key_raw or "").strip().strip("'").strip('"').strip()
-        if planet_api_key:
-            st.session_state["planet_api_key"] = planet_api_key
+        planet_api_key = st.session_state.get("planet_api_key", "")
+        if planet_api_key and not st.session_state.get("planet_key_editing"):
+            saved_note = "saved on this computer" if st.session_state.get("planet_key_saved") else "this session only"
+            st.success(f"✅ Planet API key linked (••••{planet_api_key[-4:]}, {saved_note})")
+            pl_b1, pl_b2 = st.columns(2)
+            if pl_b1.button("🔄 Change key", key="planet_key_change_btn", use_container_width=True):
+                st.session_state["planet_key_editing"] = True
+                st.rerun()
+            if pl_b2.button("🗑️ Unlink", key="planet_key_unlink_btn", use_container_width=True):
+                st.session_state["planet_api_key"] = ""
+                st.session_state["planet_key_saved"] = False
+                st.session_state["planet_key_unlinked"] = True
+                update_linked_accounts(planet_api_key=None)
+                st.rerun()
+        else:
+            pl_form_ver = st.session_state.get("planet_key_form_ver", 0)
+            planet_api_key_raw = st.text_input(
+                "Personal Planet API key:",
+                key=f"planet_api_key_input_{pl_form_ver}",
+                type="password",
+                placeholder="Paste your PL_API_KEY here...",
+                help="Found in your Planet account settings -> API key.",
+            )
+            remember_pl = st.checkbox(
+                "Remember on this computer",
+                value=ACCOUNT_STORE_ENABLED,
+                disabled=not ACCOUNT_STORE_ENABLED,
+                key=f"planet_key_remember_{pl_form_ver}",
+                help=f"Saves the key to {ACCOUNTS_STORE_PATH} so you don't need to enter it again."
+                if ACCOUNT_STORE_ENABLED
+                else "Not available on the shared web version of the platform.",
+            )
+            new_pl_key = str(planet_api_key_raw or "").strip().strip("'").strip('"').strip()
+            if new_pl_key:
+                st.session_state["planet_api_key"] = new_pl_key
+                st.session_state["planet_key_saved"] = bool(remember_pl and ACCOUNT_STORE_ENABLED)
+                update_linked_accounts(planet_api_key=new_pl_key if remember_pl else None)
+                st.session_state["planet_key_editing"] = False
+                st.session_state["planet_key_form_ver"] = pl_form_ver + 1
+                st.rerun()
+            elif planet_api_key and st.button("Cancel", key="planet_key_cancel_btn"):
+                st.session_state["planet_key_editing"] = False
+                st.rerun()
+            # While editing, keep using the currently linked key (if any) until a new one is entered
+            planet_api_key = st.session_state.get("planet_api_key", "")
     with api_c2:
         search_start_str = st.text_input(
             "Season start date (YYYY-MM-DD):",
