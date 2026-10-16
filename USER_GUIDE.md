@@ -1,7 +1,7 @@
-# Soybean Red Crown Rot (RCR) Scouting Platform
-### User Guide for Field Agronomists & Researchers (Zero Code Required)
+# RCR Scout — User Guide
+### Satellite mapping of red crown rot in soybean · For Field Agronomists & Researchers (Zero Code Required)
 
-Welcome to the **Soybean Red Crown Rot (RCR) Automated Field Scouting Platform**, developed by the **Smart Plant Pathology Lab** at the **University of Illinois Urbana-Champaign**.
+Welcome to **RCR Scout**, the Soybean Red Crown Rot (RCR) automated field scouting platform developed by the **Smart Plant Pathology Lab** at the **University of Illinois Urbana-Champaign**.
 
 This application enables field agronomists, crop consultants, researchers, and growers to detect and map Red Crown Rot in commercial soybean fields using satellite imagery and machine learning, with **zero programming experience required**.
 

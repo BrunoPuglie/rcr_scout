@@ -1,10 +1,10 @@
 @echo off
 setlocal enabledelayedexpansion
-title Soybean RCR Field Scouting Platform
+title RCR Scout
 cd /d "%~dp0"
 
 echo ============================================================================
-echo   Soybean Red Crown Rot (RCR) - Automated Field Scouting Platform
+echo   RCR Scout - Satellite mapping of red crown rot in soybean
 echo   Smart Plant Pathology Lab - University of Illinois Urbana-Champaign
 echo ============================================================================
 echo.
@@ -169,7 +169,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [2/2] Launching RCR Scouting Web Platform in your default browser...
+echo [2/2] Launching RCR Scout in your default browser...
 echo       (Keep this command window open while using the platform. Close it or press Ctrl+C to stop.)
 echo.
 

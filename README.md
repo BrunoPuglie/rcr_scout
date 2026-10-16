@@ -1,4 +1,5 @@
-# Soybean Red Crown Rot (RCR) Automated Field Scouting Platform
+# RCR Scout
+### Satellite mapping of red crown rot in soybean
 
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.38+-FF4B4B.svg)](https://streamlit.io/)

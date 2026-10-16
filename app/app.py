@@ -1,7 +1,7 @@
 """
 app.py
 ======
-Red crown rot scouting
+RCR Scout — Satellite mapping of red crown rot in soybean
 Smart Plant Pathology Lab — University of Illinois Urbana-Champaign
 
 Architecture Note (Windows Conda Stability):
@@ -379,7 +379,7 @@ def app_icon_html(size_px: int, extra_style: str = "") -> str:
 
 
 st.set_page_config(
-    page_title="Red crown rot scouting",
+    page_title="RCR Scout",
     page_icon=fav_icon,
     layout="wide",
     initial_sidebar_state="expanded",
@@ -441,14 +441,6 @@ st.markdown(
         gap: 1rem;
     }
 
-    .md-hero-aside {
-        display: flex;
-        align-items: flex-end;
-        align-self: flex-end;
-        gap: 1.1rem;
-        margin-left: auto;
-    }
-
     .md-hero-title {
         font-size: 1.85rem;
         font-weight: 700;
@@ -457,8 +449,15 @@ st.markdown(
         color: #FFFFFF;
     }
 
+    .md-hero-tagline {
+        font-size: 1.08rem;
+        font-weight: 500;
+        color: #FFFFFF;
+        margin: 0 0 0.45rem 0;
+    }
+
     .md-hero-subtitle {
-        font-size: 0.96rem;
+        font-size: 0.88rem;
         font-weight: 400;
         color: #E2E8F0;
         margin: 0;
@@ -684,14 +683,14 @@ st.markdown(
 st.markdown(
     f"""
     <div class="md-hero-card">
-        <div>
-            <div class="md-hero-title">Red crown rot scouting</div>
+        <div style="flex-basis:100%;">
+            <div class="md-hero-title">RCR Scout</div>
+            <div class="md-hero-tagline">Satellite mapping of red crown rot in soybean</div>
             <p class="md-hero-subtitle">
                 Upload field boundary &rarr; Select soybean season &amp; Sentinel-2 trajectory &rarr;
                 Stage PlanetScope imagery &rarr; Generate RCR probability &amp; classification maps
             </p>
         </div>
-        <div class="md-hero-aside">
         <div class="md-lab-badge">
             <div style="font-weight:700; font-size:0.92rem; color:#FFFFFF; margin-bottom:2px;">
                 🏛️ Smart Plant Pathology Lab
@@ -704,8 +703,7 @@ st.markdown(
                 📧 <b>Dr. Bruno D. Pugliese:</b> <a href="mailto:brunodp@illinois.edu">brunodp@illinois.edu</a>
             </div>
         </div>
-        {app_icon_html(72)}
-        </div>
+        {app_icon_html(120, "margin-left:auto; align-self:flex-end;")}
     </div>
     """,
     unsafe_allow_html=True,
@@ -740,11 +738,11 @@ with st.sidebar:
     st.markdown(
         f"""
         <div style="background-color:#13294B; color:white; padding:0.9rem 1rem; border-radius:10px; border-bottom:4px solid #FF5F05; margin-bottom:1rem; display:flex; align-items:center; gap:0.75rem;">
-            {app_icon_html(40)}
             <div>
                 <div style="font-weight:700; font-size:1.0rem;">Smart Plant Pathology Lab</div>
                 <div style="font-size:0.8rem; color:#CBD5E1;">University of Illinois Urbana-Champaign</div>
             </div>
+            {app_icon_html(56, "margin-left:auto; align-self:flex-end;")}
         </div>
         """,
         unsafe_allow_html=True,
@@ -2542,7 +2540,7 @@ st.markdown(
     """
     <div class="md-footer">
         <div>
-            <b style="color:#13294B;">Red crown rot scouting</b> &mdash;
+            <b style="color:#13294B;">RCR Scout</b> &mdash;
             Smart Plant Pathology Lab, Department of Crop Sciences, University of Illinois Urbana-Champaign
         </div>
         <div>

@@ -1,4 +1,4 @@
-# Python dependencies for Soybean RCR Scouting Platform
+# Python dependencies for RCR Scout
 # Note: For Windows, using Conda / Miniforge with environment_conda.yml is recommended
 # to resolve native GDAL/PROJ C++ runtime DLLs automatically.
 
