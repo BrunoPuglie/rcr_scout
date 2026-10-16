@@ -15,7 +15,9 @@ Architecture Note (Windows Conda Stability):
 
 from __future__ import annotations
 
+import calendar
 import hashlib
+import html
 import json
 import os
 import re
@@ -24,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -93,6 +96,7 @@ _setup_cloud_earth_engine_credentials()
 DEFAULT_GEE_PROJECT = _get_default_gee_project()
 OPTIMAL_THRESHOLD = 0.48
 TARGET_DROP_RATIO = 0.80
+MAX_PLANET_PREVIEWS_PER_CLICK = 12  # caps Planet tile streaming per "Preview" click (~4-16 tiles per scene)
 
 
 def get_session_workdir() -> Path:
@@ -686,6 +690,7 @@ for key, default in [
     ("poly_sig", ""),
     ("pheno_res", None),
     ("planet_search_res", None),
+    ("planet_scene_previews", {}),
     ("api_downloaded_files", []),
     ("run_res", None),
 ]:
@@ -1487,9 +1492,6 @@ with tab_manual:
         st.session_state["manual_uploaded_files"] = staged_paths
         if added_count > 0:
             st.success(f"✅ Staged {added_count} PlanetScope image(s) for Field `{active_fid}` ({season_input})!")
-        if skipped_files:
-            with st.expander(f"ℹ️ {len(skipped_files)} auxiliary file(s) ignored — not needed for the classification"):
-                st.markdown("\n".join(f"- `{n}` — {r}" for n, r in skipped_files))
 
 # ------------------------------------------------------------------------------
 # TAB B: PERSONAL PLANET API KEY (AUTO-SEARCH & CLIP ORDER)
@@ -1681,6 +1683,9 @@ with tab_api:
                 "Acquisition date": s["date_iso"],
                 "Field coverage": cov_badge,
                 "Cloud cover (%)": s["cloud_cover_pct"],
+                "Clear (%)": s.get("clear_percent"),
+                "Sun elevation (°)": s.get("sun_elevation"),
+                "View angle (°)": s.get("view_angle"),
                 "Planet scene ID": s["scene_id"],
                 "Instrument": s["instrument"],
             })
@@ -1714,10 +1719,29 @@ with tab_api:
                     help="Geometric percentage of your field boundary covered by this PlanetScope scene footprint.",
                 ),
                 "Cloud cover (%)": st.column_config.NumberColumn("Cloud cover (%)", format="%.1f%%"),
+                "Clear (%)": st.column_config.NumberColumn(
+                    "Clear (%)",
+                    format="%.0f%%",
+                    help="Share of the whole scene flagged clear by Planet's UDM2 (no cloud, haze, shadow or snow). "
+                         "Scene-wide, not field-specific: use the previews below to check your field.",
+                ),
+                "Sun elevation (°)": st.column_config.NumberColumn(
+                    "Sun elevation (°)",
+                    format="%.0f°",
+                    help="Low sun angles (< ~30°) produce longer shadows and darker, less comparable reflectance.",
+                ),
+                "View angle (°)": st.column_config.NumberColumn(
+                    "View angle (°)",
+                    format="%.1f°",
+                    help="Off-nadir viewing angle of the satellite. Lower is better for geometric and radiometric consistency.",
+                ),
                 "Planet scene ID": st.column_config.TextColumn("Planet scene ID"),
                 "Instrument": st.column_config.TextColumn("Instrument"),
             },
-            disabled=["Acquisition date", "Field coverage", "Cloud cover (%)", "Planet scene ID", "Instrument"],
+            disabled=[
+                "Acquisition date", "Field coverage", "Cloud cover (%)", "Clear (%)",
+                "Sun elevation (°)", "View angle (°)", "Planet scene ID", "Instrument",
+            ],
             hide_index=True,
             use_container_width=True,
             key=f"planet_catalog_table_selector_{only_full_cov}",
@@ -1745,6 +1769,76 @@ with tab_api:
                 )
         else:
             st.warning("⚠️ No captures currently selected. Please check at least one scene in the table above.")
+
+        # Visual quality check: field-cropped true-colour previews of the selected scenes.
+        # Previews are fetched on demand only and cached per (field boundary, scene) so reruns never refetch.
+        st.markdown('<div class="md-output-title">👁️ Visual quality check</div>', unsafe_allow_html=True)
+        preview_store = st.session_state["planet_scene_previews"]
+        preview_sig = st.session_state.get("poly_sig", "")
+        scenes_by_id = {s["scene_id"]: s for s in all_scenes}
+        unpreviewed_ids = [sid for sid in chosen_scene_ids if f"{preview_sig}|{sid}" not in preview_store]
+        ids_to_preview = unpreviewed_ids[:MAX_PLANET_PREVIEWS_PER_CLICK]
+
+        prev_c1, prev_c2 = st.columns([1.6, 2.4])
+        with prev_c1:
+            preview_btn = st.button(
+                f"👁️ Preview {len(ids_to_preview)} selected scene(s)",
+                disabled=(not ids_to_preview or not planet_api_key),
+                key="planet_preview_btn",
+            )
+        with prev_c2:
+            st.caption(
+                "💡 Shows each selected capture in true colour, cropped to your field with the boundary outlined, "
+                "so you can spot clouds, haze or shadows before ordering. No order is placed."
+            )
+
+        if preview_btn and ids_to_preview:
+            if len(unpreviewed_ids) > len(ids_to_preview):
+                st.info(
+                    f"Previewing the first {len(ids_to_preview)} of {len(unpreviewed_ids)} selected scenes. "
+                    "Click again to preview the rest."
+                )
+            with st.spinner(f"Fetching Planet true-colour previews for {len(ids_to_preview)} scene(s)..."):
+                try:
+                    preview_res = run_worker({
+                        "action": "preview_planet_scenes",
+                        "api_key": planet_api_key,
+                        "boundary_geojson_path": pinfo["boundary_geojson_path"],
+                        "scene_ids": ids_to_preview,
+                        "max_scenes": MAX_PLANET_PREVIEWS_PER_CLICK,
+                    })
+                    failed = []
+                    for p in preview_res.get("previews", []):
+                        if p.get("status") == "error":
+                            failed.append(p["scene_id"])  # not cached, so the user can retry
+                        else:
+                            preview_store[f"{preview_sig}|{p['scene_id']}"] = p
+                    if failed:
+                        st.warning(f"⚠️ Could not build a preview for {len(failed)} scene(s). Click the button again to retry.")
+                except Exception as e:
+                    st.error(f"Planet preview failed: {e}")
+
+        previewed_ids = [sid for sid in chosen_scene_ids if f"{preview_sig}|{sid}" in preview_store]
+        for row_start in range(0, len(previewed_ids), 3):
+            grid_cols = st.columns(3)
+            for col, sid in zip(grid_cols, previewed_ids[row_start : row_start + 3]):
+                p = preview_store[f"{preview_sig}|{sid}"]
+                s = scenes_by_id.get(sid, {})
+                with col:
+                    if p.get("status") == "ok" and Path(p.get("png_path", "")).exists():
+                        render_crisp_figure(p["png_path"], use_svg_if_available=False, full_width=True, max_height_px=360)
+                    else:
+                        st.warning(p.get("message") or "No preview available for this scene.")
+                    clear_val = s.get("clear_percent")
+                    clear_txt = f"{clear_val:.0f}%" if clear_val is not None else "n/a"
+                    caption = (
+                        f"**{s.get('date_iso', sid)}** · clear {clear_txt} · "
+                        f"cloud {float(s.get('cloud_cover_pct', 0.0)):.1f}% · "
+                        f"coverage {float(s.get('coverage_pct', 0.0)):.0f}%"
+                    )
+                    if s.get("suggestion"):
+                        caption += f"  \n🟡 {s['suggestion']}"
+                    st.caption(caption)
 
         if st.button(
             f"⬇️ 2. Order & download {len(chosen_scene_ids)} selected scene(s) via Planet API",
@@ -1906,6 +2000,126 @@ def _format_raster_display(p: Path) -> str:
     iso = format_yyyymmdd_iso(d_str) if d_str else "Unknown date"
     return f"📅 {iso} · {p.name}"
 
+
+def _render_capture_calendar(
+    rasters: List[Path],
+    peak_path: Optional[Path],
+    target_paths: List[Path],
+    s2_peak_iso: Optional[str] = None,
+) -> None:
+    """Render a read-only month calendar highlighting capture dates and their roles in Step 4."""
+    captures_by_day: Dict[date, List[Path]] = {}
+    for p in rasters:
+        d_str = parse_date_from_filename(p.name)
+        if d_str:
+            try:
+                captures_by_day.setdefault(datetime.strptime(d_str, "%Y%m%d").date(), []).append(p)
+            except ValueError:
+                pass
+    if not captures_by_day:
+        return
+
+    peak_day = None
+    if peak_path is not None:
+        pk = parse_date_from_filename(Path(peak_path).name)
+        peak_day = datetime.strptime(pk, "%Y%m%d").date() if pk else None
+    target_names = {Path(p).name for p in target_paths}
+    s2_day = None
+    if s2_peak_iso:
+        try:
+            s2_day = datetime.strptime(s2_peak_iso, "%Y-%m-%d").date()
+        except ValueError:
+            s2_day = None
+
+    first_day, last_day = min(captures_by_day), max(captures_by_day)
+    months = []
+    y, m = first_day.year, first_day.month
+    while (y, m) <= (last_day.year, last_day.month):
+        months.append((y, m))
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+
+    cal = calendar.Calendar(firstweekday=6)  # Sunday-first, as on US wall calendars
+    month_html = []
+    for y, m in months:
+        cells = "".join(f'<div class="rcal-dow">{d}</div>' for d in ("S", "M", "T", "W", "T", "F", "S"))
+        for day in cal.itermonthdates(y, m):
+            if day.month != m:
+                cells += '<div class="rcal-day rcal-out"></div>'
+                continue
+            classes = ["rcal-day"]
+            tips = [day.isoformat()]
+            day_captures = captures_by_day.get(day, [])
+            if day_captures:
+                is_peak = peak_day == day
+                is_target = any(p.name in target_names for p in day_captures)
+                if is_peak and is_target:
+                    classes.append("rcal-both")
+                    tips.append("Peak canopy mask + classification")
+                elif is_peak:
+                    classes.append("rcal-peak")
+                    tips.append("Peak canopy mask")
+                elif is_target:
+                    classes.append("rcal-target")
+                    tips.append("Classification date")
+                else:
+                    classes.append("rcal-avail")
+                    tips.append("Available, not selected")
+                if peak_day and is_target and not is_peak:
+                    tips.append(f"{(day - peak_day).days:+d} days from peak")
+                tips.extend(p.name for p in day_captures)
+            if s2_day == day:
+                classes.append("rcal-s2")
+                tips.append("Sentinel-2 NDVI peak")
+            class_attr = " ".join(classes)
+            tip_attr = "&#10;".join(html.escape(t) for t in tips)
+            cells += f'<div class="{class_attr}" title="{tip_attr}">{day.day}</div>'
+        month_html.append(
+            f'<div class="rcal-month"><div class="rcal-mtitle">{calendar.month_name[m]} {y}</div>'
+            f'<div class="rcal-grid">{cells}</div></div>'
+        )
+
+    legend = (
+        '<div class="rcal-legend">'
+        '<span><i class="rcal-sw rcal-peak"></i>Peak canopy mask</span>'
+        '<span><i class="rcal-sw rcal-target"></i>Classification date</span>'
+        '<span><i class="rcal-sw rcal-both"></i>Both</span>'
+        '<span><i class="rcal-sw rcal-avail"></i>Available, not selected</span>'
+        + ('<span><i class="rcal-sw rcal-s2dot"></i>Sentinel-2 NDVI peak</span>' if s2_day else "")
+        + "</div>"
+    )
+    style = (
+        "<style>"
+        ".rcal-wrap{background:var(--md-surface);border:1px solid var(--md-outline);border-radius:12px;"
+        "padding:0.9rem 1rem 0.7rem;margin:0.4rem 0 0.9rem;}"
+        ".rcal-months{display:flex;flex-wrap:wrap;gap:1.1rem 1.6rem;}"
+        ".rcal-month{flex:0 0 auto;}"
+        ".rcal-mtitle{font-weight:700;font-size:0.86rem;color:var(--illini-blue);margin-bottom:0.3rem;}"
+        ".rcal-grid{display:grid;grid-template-columns:repeat(7,1.9rem);gap:3px;}"
+        ".rcal-dow{font-size:0.66rem;font-weight:600;color:var(--md-text-secondary);text-align:center;}"
+        ".rcal-day{height:1.9rem;line-height:1.9rem;text-align:center;font-size:0.74rem;border-radius:50%;"
+        "color:#9AA6B8;position:relative;cursor:default;}"
+        ".rcal-avail{color:var(--illini-blue);font-weight:600;box-shadow:inset 0 0 0 1.5px var(--illini-blue-accent);"
+        "background:var(--illini-blue-light);}"
+        ".rcal-target{background:var(--illini-blue);color:#FFFFFF;font-weight:700;}"
+        ".rcal-peak{background:var(--illini-orange);color:#FFFFFF;font-weight:700;}"
+        ".rcal-both{background:var(--illini-orange);color:#FFFFFF;font-weight:700;"
+        "box-shadow:0 0 0 2px var(--md-surface),0 0 0 4px var(--illini-blue);}"
+        ".rcal-s2::after{content:'';position:absolute;left:50%;bottom:1px;width:5px;height:5px;margin-left:-2.5px;"
+        "border-radius:50%;background:#2E9E5B;}"
+        ".rcal-legend{display:flex;flex-wrap:wrap;gap:0.4rem 1.1rem;margin-top:0.7rem;font-size:0.74rem;"
+        "color:var(--md-text-secondary);}"
+        ".rcal-legend span{display:inline-flex;align-items:center;gap:0.35rem;}"
+        ".rcal-sw{display:inline-block;width:0.8rem;height:0.8rem;border-radius:50%;}"
+        ".rcal-sw.rcal-both{box-shadow:0 0 0 1.5px var(--md-surface),0 0 0 3px var(--illini-blue);}"
+        ".rcal-s2dot{width:0.45rem;height:0.45rem;background:#2E9E5B;}"
+        "</style>"
+    )
+    months_attr = "".join(month_html)
+    st.markdown(
+        f'{style}<div class="rcal-wrap"><div class="rcal-months">{months_attr}</div>{legend}</div>',
+        unsafe_allow_html=True,
+    )
+
 discovered_rasters_map: Dict[str, Path] = {}
 
 # 1. Any rasters from API downloads or manual uploads in session
@@ -2011,7 +2225,7 @@ else:
                     diffs.append(abs((p_dt - peak_dt).days))
                 else:
                     diffs.append(9999)
-            default_peak_idx = int(np.argmin(diffs))
+            default_peak_idx = diffs.index(min(diffs))
         except Exception:
             default_peak_idx = 0
 
@@ -2045,6 +2259,14 @@ else:
             help="Select one or multiple capture dates to run through the 13-feature RCR machine learning classifier.",
             key="classification_targets_select",
         )
+
+    st.markdown('<div class="md-output-title">🗓️ Capture calendar</div>', unsafe_allow_html=True)
+    _render_capture_calendar(
+        all_available_rasters,
+        selected_peak_path,
+        selected_target_paths,
+        s2_peak_iso=pr.get("peak_date") if pr else None,
+    )
 
 c_poly_ok = pinfo is not None
 c_peak_ok = selected_peak_path is not None and Path(selected_peak_path).exists()
