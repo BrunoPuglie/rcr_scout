@@ -1,6 +1,7 @@
 # RCR Scout
 ### Satellite mapping of red crown rot in soybean
 
+[![Version](https://img.shields.io/badge/Version-1.1.0-2E9E5B.svg)](CHANGELOG.md)
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.38+-FF4B4B.svg)](https://streamlit.io/)
 [![Institution](https://img.shields.io/badge/Institution-University%20of%20Illinois%20Urbana--Champaign-13294B.svg)](https://illinois.edu/)
@@ -17,8 +18,10 @@ The platform is designed for **field agronomists, extension specialists, crop co
 - **Zero-Code Standalone Interface**: Runs locally in your web browser with simple 1-click Windows batch launchers.
 - **Sentinel-2 Phenology Discovery**: Automatically tracks continuous canopy NDVI throughout the season (via Google Earth Engine) to discover optimal disease scouting dates ($t_0$ at 80% peak canopy NDVI) and the baseline peak canopy date ($t_{\text{peak}}$).
 - **Flexible PlanetScope Ingestion**:
-  - **Option A**: Drag-and-drop uploaded 8-band Surface Reflectance GeoTIFFs downloaded from Planet Explorer.
-  - **Option B**: Automatic cloud-free scene search and polygon-clipped downloading via personal Planet API key.
+  - **Option A**: Drag-and-drop the Planet order `.zip` (or its files) exactly as downloaded from Planet Explorer — the 8-band Surface Reflectance images are picked out automatically.
+  - **Option B**: Automatic cloud-free scene search, field-cropped true-colour scene previews, and polygon-clipped downloading via personal Planet API key.
+- **Interactive Capture Calendar**: Pick the peak canopy mask image and classification dates by clicking capture days on a calendar.
+- **Saved Accounts**: Earth Engine and Planet credentials can be remembered between sessions on your own computer (never on the shared web version).
 - **Calibrated Machine Learning Engine (RCRC v3.1)**:
   - Early-season $3\sigma$ canopy mask to eliminate bare soil, grass waterways, and non-crop edges.
   - Within-field normalization across 13 spectral indices and reflectance bands.
@@ -83,6 +86,7 @@ rcr_scout/
 │
 ├── USER_GUIDE.md                   # Comprehensive step-by-step user manual
 ├── README.md                       # Platform overview and quick reference
+├── CHANGELOG.md                    # Release history
 ├── environment_conda.yml           # Complete Conda environment specification (for Windows setup)
 ├── requirements.txt                # Python package list (for Streamlit Cloud & Pip)
 ├── packages.txt                    # System Linux C-libraries (for Streamlit Cloud)
@@ -91,6 +95,9 @@ rcr_scout/
 │   ├── app.py                      # Streamlit interactive application
 │   ├── rcr_engine.py               # Remote sensing, GEE, and ML analytics engine
 │   ├── rcr_worker.py               # Subprocess worker ensuring GDAL/Conda isolation
+│   ├── planet_files.py             # Planet order ZIP / file detection helpers
+│   ├── assets/                     # App icon and header images
+│   ├── components/                 # Custom UI components (capture calendar)
 │   └── fonts/                      # Montserrat typography assets
 │
 └── model/

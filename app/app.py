@@ -41,6 +41,8 @@ from planet_files import describe_planet_file, extract_sr_rasters_from_zip, is_p
 # 1. PATHS, CONSTANTS & SUBPROCESS WORKER RUNNER
 # ==============================================================================
 
+APP_VERSION = "1.1.0"  # keep in sync with CHANGELOG.md and the git release tag
+
 APP_DIR = Path(__file__).resolve().parent
 STANDALONE_ROOT = APP_DIR.parent
 WORKER_SCRIPT = APP_DIR / "rcr_worker.py"
@@ -899,7 +901,8 @@ with st.sidebar:
     st.divider()
     st.markdown(
         "**Model architecture:**\n"
-        "- **Model version:** `RCRC v3.1`"
+        "- **Model version:** `RCRC v3.1`\n"
+        f"- **Platform version:** `RCR Scout v{APP_VERSION}`"
     )
     st.divider()
     st.markdown(

@@ -1,6 +1,8 @@
 # RCR Scout — User Guide
 ### Satellite mapping of red crown rot in soybean · For Field Agronomists & Researchers (Zero Code Required)
 
+*Platform version 1.1.0 — see [CHANGELOG.md](CHANGELOG.md) for what's new.*
+
 Welcome to **RCR Scout**, the Soybean Red Crown Rot (RCR) automated field scouting platform developed by the **Smart Plant Pathology Lab** at the **University of Illinois Urbana-Champaign**.
 
 This application enables field agronomists, crop consultants, researchers, and growers to detect and map Red Crown Rot in commercial soybean fields using satellite imagery and machine learning, with **zero programming experience required**.
@@ -127,6 +129,8 @@ You need 8-band Surface Reflectance PlanetScope SuperDove GeoTIFFs (`PSScene` / 
 1. In **Step 4**, the platform discovers all staged rasters and assigns:
    - **Peak canopy mask image** (used for early $3\sigma$ canopy masking).
    - **Target classification dates** (one or multiple dates).
+
+   You can also make these selections in the **🗓️ Capture calendar**: choose what a click sets (**Classification dates (add / remove)** or **Peak canopy mask**), then click any highlighted capture date. Clicking a classification date again removes it.
 2. Click **"🔬 Run RCR classification on selected date(s)"**.
 3. The platform executes the calibrated RCRC v3.1 model:
    - Calculates 13 normalized within-field spectral indices and reflectance bands.
