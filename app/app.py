@@ -31,6 +31,8 @@ import pandas as pd
 from PIL import Image
 import streamlit as st
 
+from planet_files import describe_planet_file, extract_sr_rasters_from_zip, is_planet_sr_raster, select_sr_rasters
+
 # ==============================================================================
 # 1. PATHS, CONSTANTS & SUBPROCESS WORKER RUNNER
 # ==============================================================================
@@ -1427,16 +1429,18 @@ available_classification_captures: List[Dict[str, str]] = []  # [{"date_str": "2
 # ------------------------------------------------------------------------------
 with tab_manual:
     st.markdown(
-        "Upload the **8-band Surface Reflectance PlanetScope GeoTIFFs** (`.tif`, `.tiff`) or an **Order ZIP bundle** (`.zip`) "
-        "downloaded from **Planet Explorer**."
+        "Upload the **ZIP file downloaded from Planet** as it is — no need to unzip it. "
+        "The platform automatically finds the 8-band Surface Reflectance image of each date and ignores "
+        "the other files of the order (metadata `.json`/`.xml` and the `udm2` cloud mask)."
     )
 
     up_files = st.file_uploader(
-        "Upload PlanetScope GeoTIFF(s) or Order ZIP file:",
-        type=["tif", "tiff", "zip"],
+        "Upload Planet order ZIP (or the files inside it):",
+        type=["zip", "tif", "tiff", "json", "xml"],
         accept_multiple_files=True,
         key="up_planet_tifs_multi",
-        help="Upload one or multiple .tif/.tiff GeoTIFF files, or the full .zip bundle downloaded from Planet Explorer.",
+        help="Upload the .zip downloaded from Planet. You can also drop the unzipped files (all of them is fine); "
+             "only the *_AnalyticMS_SR_8b_harmonized_clip.tif image is used.",
     )
 
     save_dir = SAT_BASE_DIR / active_fid / str(season_input)
@@ -1445,35 +1449,47 @@ with tab_manual:
     if up_files:
         staged_paths = list(st.session_state.get("manual_uploaded_files", []))
         added_count = 0
+        skipped_files: List[tuple] = []
+        loose_names = [Path(uf.name).name for uf in up_files if not uf.name.lower().endswith(".zip")]
+        keep_loose = set(select_sr_rasters(loose_names))
         for uf in up_files:
-            raw_bytes = uf.getvalue()
             uf_name = Path(uf.name).name
             if uf_name.lower().endswith(".zip"):
                 zip_path = save_dir / uf_name
-                zip_path.write_bytes(raw_bytes)
+                zip_path.write_bytes(uf.getvalue())
                 try:
-                    with zipfile.ZipFile(zip_path, "r") as zf:
-                        for member in zf.namelist():
-                            m_name = Path(member).name
-                            if m_name.lower().endswith((".tif", ".tiff", ".geotif", ".geotiff")) and "udm" not in m_name.lower():
-                                ext_path = save_dir / m_name
-                                with zf.open(member) as zf_in, open(ext_path, "wb") as f_out:
-                                    shutil.copyfileobj(zf_in, f_out)
-                                if str(ext_path) not in staged_paths:
-                                    staged_paths.append(str(ext_path))
-                                    added_count += 1
+                    extracted, zip_skipped = extract_sr_rasters_from_zip(zip_path, save_dir)
                 except Exception as zip_err:
                     st.error(f"Error extracting ZIP archive '{uf_name}': {zip_err}")
-            elif uf_name.lower().endswith((".tif", ".tiff", ".geotif", ".geotiff")):
+                    continue
+                finally:
+                    zip_path.unlink(missing_ok=True)
+                skipped_files.extend(zip_skipped)
+                if not extracted:
+                    st.warning(
+                        f"⚠️ No 8-band Surface Reflectance image was found inside `{uf_name}`. "
+                        "When ordering from Planet, select the **Surface Reflectance – 8 band** product (`analytic_8b_sr_udm2`)."
+                    )
+                for ext_path in extracted:
+                    if str(ext_path) not in staged_paths:
+                        staged_paths.append(str(ext_path))
+                        added_count += 1
+            elif uf_name in keep_loose:
                 tif_path = save_dir / uf_name
-                tif_path.write_bytes(raw_bytes)
+                tif_path.write_bytes(uf.getvalue())
                 if str(tif_path) not in staged_paths:
                     staged_paths.append(str(tif_path))
                     added_count += 1
+            else:
+                ok, reason = describe_planet_file(uf_name)
+                skipped_files.append((uf_name, "duplicate of a preferred 8-band harmonized image" if ok else reason))
 
         st.session_state["manual_uploaded_files"] = staged_paths
         if added_count > 0:
-            st.success(f"✅ Staged {added_count} PlanetScope GeoTIFF raster(s) for Field `{active_fid}` ({season_input})!")
+            st.success(f"✅ Staged {added_count} PlanetScope image(s) for Field `{active_fid}` ({season_input})!")
+        if skipped_files:
+            with st.expander(f"ℹ️ {len(skipped_files)} auxiliary file(s) ignored — not needed for the classification"):
+                st.markdown("\n".join(f"- `{n}` — {r}" for n, r in skipped_files))
 
 # ------------------------------------------------------------------------------
 # TAB B: PERSONAL PLANET API KEY (AUTO-SEARCH & CLIP ORDER)
@@ -1664,7 +1680,6 @@ with tab_api:
                 "Select": is_suggested,
                 "Acquisition date": s["date_iso"],
                 "Field coverage": cov_badge,
-                "Suggestion status": f"⭐ {s['suggestion']}" if s.get("suggestion") else "— Available pass",
                 "Cloud cover (%)": s["cloud_cover_pct"],
                 "Planet scene ID": s["scene_id"],
                 "Instrument": s["instrument"],
@@ -1674,14 +1689,19 @@ with tab_api:
             display_rows[0]["Select"] = True
 
         catalog_df = pd.DataFrame(display_rows)
+        suggested_row_mask = [s["scene_id"] in suggested_ids for s in filtered_scenes]
+
+        def _highlight_suggested(row):
+            style = "background-color: rgba(255, 193, 7, 0.22)" if suggested_row_mask[row.name] else ""
+            return [style] * len(row)
 
         st.info(
             "💡 **Direct catalog selection:** Check or uncheck scenes directly in the **Select** column of the table below to choose which captures to download. "
-            "Suggested captures based on your Sentinel-2 NDVI plot are pre-checked."
+            "Captures suggested from your Sentinel-2 NDVI plot are **highlighted in amber** and pre-checked."
         )
 
         edited_catalog = st.data_editor(
-            catalog_df,
+            catalog_df.style.apply(_highlight_suggested, axis=1),
             column_config={
                 "Select": st.column_config.CheckboxColumn(
                     "Select",
@@ -1693,12 +1713,11 @@ with tab_api:
                     "Field coverage",
                     help="Geometric percentage of your field boundary covered by this PlanetScope scene footprint.",
                 ),
-                "Suggestion status": st.column_config.TextColumn("Suggestion status"),
                 "Cloud cover (%)": st.column_config.NumberColumn("Cloud cover (%)", format="%.1f%%"),
                 "Planet scene ID": st.column_config.TextColumn("Planet scene ID"),
                 "Instrument": st.column_config.TextColumn("Instrument"),
             },
-            disabled=["Acquisition date", "Field coverage", "Suggestion status", "Cloud cover (%)", "Planet scene ID", "Instrument"],
+            disabled=["Acquisition date", "Field coverage", "Cloud cover (%)", "Planet scene ID", "Instrument"],
             hide_index=True,
             use_container_width=True,
             key=f"planet_catalog_table_selector_{only_full_cov}",
@@ -1892,7 +1911,7 @@ discovered_rasters_map: Dict[str, Path] = {}
 # 1. Any rasters from API downloads or manual uploads in session
 for p_str in st.session_state.get("api_downloaded_files", []) + st.session_state.get("manual_uploaded_files", []):
     p = Path(p_str)
-    if p.exists() and p.name not in discovered_rasters_map:
+    if p.exists() and is_planet_sr_raster(p.name) and p.name not in discovered_rasters_map:
         discovered_rasters_map[p.name] = p
 
 # 2. Any rasters in routine_inspection/raw_satellite/
@@ -1917,7 +1936,7 @@ if active_fid in ("FIELD_1", "PC3") or inferred_default_fid in ("FIELD_1", "PC3"
 for cdir in candidate_dirs:
     if cdir.exists():
         for f in cdir.rglob("*.tif*"):
-            if f.is_file() and "udm" not in f.name.lower() and f.name not in discovered_rasters_map:
+            if f.is_file() and is_planet_sr_raster(f.name) and f.name not in discovered_rasters_map:
                 discovered_rasters_map[f.name] = f
 
 # Fallback: check any directories under SAT_BASE_DIR that have tifs for this season
@@ -1925,12 +1944,12 @@ if not discovered_rasters_map:
     for s_dir in SAT_BASE_DIR.glob(f"*/{season_input}"):
         if s_dir.is_dir():
             for f in s_dir.rglob("*.tif*"):
-                if f.is_file() and "udm" not in f.name.lower() and f.name not in discovered_rasters_map:
+                if f.is_file() and is_planet_sr_raster(f.name) and f.name not in discovered_rasters_map:
                     discovered_rasters_map[f.name] = f
 
-# Sort rasters chronologically
+# Keep one image per capture (prefers 8-band harmonized SR) and sort chronologically
 all_available_rasters = sorted(
-    list(discovered_rasters_map.values()),
+    [Path(p) for p in select_sr_rasters(str(p) for p in discovered_rasters_map.values())],
     key=lambda p: (parse_date_from_filename(p.name) or "99999999", p.name),
 )
 

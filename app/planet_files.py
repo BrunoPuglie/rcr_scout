@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import re
+import shutil
 import zipfile
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
@@ -89,10 +90,11 @@ def iter_zip_members(zf: zipfile.ZipFile, depth: int = 0):
             continue
         if info.filename.lower().endswith(".zip") and depth < 1:
             try:
-                with zipfile.ZipFile(io.BytesIO(zf.read(info))) as inner:
-                    yield from iter_zip_members(inner, depth + 1)
+                # Left open (in memory) so callers can read members after iteration finishes
+                inner = zipfile.ZipFile(io.BytesIO(zf.read(info)))
             except zipfile.BadZipFile:
                 continue
+            yield from iter_zip_members(inner, depth + 1)
         else:
             yield info.filename, (lambda z=zf, i=info: z.open(i))
 
@@ -114,15 +116,11 @@ def extract_sr_rasters_from_zip(zip_path: Path, dest_dir: Path) -> Tuple[List[Pa
                 ok, reason = describe_planet_file(member)
                 if ok:
                     reason = "duplicate of a preferred 8-band harmonized image"
-                if reason != "system file" and not base.lower() == "manifest.json":
+                if reason != "system file" and base.lower() != "manifest.json":
                     skipped.append((base, reason))
                 continue
             target = dest_dir / base
             with opener() as src, open(target, "wb") as dst:
-                while True:
-                    chunk = src.read(1 << 20)
-                    if not chunk:
-                        break
-                    dst.write(chunk)
+                shutil.copyfileobj(src, dst)
             extracted.append(target)
     return extracted, skipped

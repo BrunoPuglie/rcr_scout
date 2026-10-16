@@ -76,6 +76,8 @@ import shapely
 from shapely.geometry import box, shape
 from shapely.ops import unary_union
 
+from planet_files import extract_sr_rasters_from_zip, select_sr_rasters
+
 # ==============================================================================
 # 1. PATHS, PALETTES, FONTS & CONSTANTS
 # ==============================================================================
@@ -1078,20 +1080,12 @@ def _download_planet_file(loc: str, target_path: Path, clean_key: str):
 
 def _unpack_zip_archive(zip_path: Path, extract_dir: Path) -> List[str]:
     """Unpacks a ZIP archive into extract_dir and returns paths to all valid GeoTIFF rasters."""
-    extracted_tifs = []
-    extract_dir.mkdir(parents=True, exist_ok=True)
     try:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            for member in zf.namelist():
-                m_name = Path(member).name
-                if m_name.lower().endswith((".tif", ".tiff", ".geotif", ".geotiff")) and "udm" not in m_name.lower():
-                    target_file = extract_dir / m_name
-                    with zf.open(member) as z_in, open(target_file, "wb") as f_out:
-                        shutil.copyfileobj(z_in, f_out)
-                    extracted_tifs.append(str(target_file))
+        extracted, _ = extract_sr_rasters_from_zip(zip_path, extract_dir)
+        return [str(p) for p in extracted]
     except Exception as e:
         print(f"Warning: Failed to unpack ZIP bundle {zip_path.name}: {e}")
-    return extracted_tifs
+        return []
 
 
 def get_planet_order_status(api_key: str, order_id: str) -> Dict[str, Any]:
@@ -1120,11 +1114,11 @@ def get_planet_order_status(api_key: str, order_id: str) -> Dict[str, Any]:
     state = str(data.get("state", "unknown")).lower()
     results = data.get("_links", {}).get("results") or data.get("results") or []
     
-    raster_items = []
-    for item in results:
-        fname = _extract_item_filename(item).lower()
-        if (fname.endswith((".tif", ".tiff", ".geotif", ".geotiff")) and "udm" not in fname) or fname.endswith(".zip"):
-            raster_items.append(item)
+    sr_names = set(select_sr_rasters(_extract_item_filename(item) for item in results))
+    raster_items = [
+        item for item in results
+        if _extract_item_filename(item) in sr_names or _extract_item_filename(item).lower().endswith(".zip")
+    ]
 
     return {
         "status": "ok",
@@ -1429,18 +1423,8 @@ def download_planet_order_by_id(
         if state in ("success", "partial"):
             results = data.get("_links", {}).get("results") or data.get("results") or []
             
-            tif_items = [
-                item for item in results
-                if _extract_item_filename(item).lower().endswith((".tif", ".tiff", ".geotif", ".geotiff"))
-                and "udm" not in _extract_item_filename(item).lower()
-                and ("sr" in _extract_item_filename(item).lower() or "analytic" in _extract_item_filename(item).lower())
-            ]
-            if not tif_items:
-                tif_items = [
-                    item for item in results
-                    if _extract_item_filename(item).lower().endswith((".tif", ".tiff", ".geotif", ".geotiff"))
-                    and "udm" not in _extract_item_filename(item).lower()
-                ]
+            sr_names = set(select_sr_rasters(_extract_item_filename(item) for item in results))
+            tif_items = [item for item in results if _extract_item_filename(item) in sr_names]
 
             zip_items = [
                 item for item in results
@@ -1628,13 +1612,9 @@ def find_local_field_tifs(field_id: str, season: str) -> Dict[str, Path]:
     found: Dict[str, Path] = {}
     for d in candidate_dirs:
         if d.exists():
-            tifs = [
-                f for f in d.rglob("*.tif*")
-                if f.is_file() and "udm" not in f.name.lower()
-            ]
-            sr_tifs = [f for f in tifs if "sr" in f.name.lower() or "analytic" in f.name.lower()]
-            use_tifs = sr_tifs if sr_tifs else tifs
-            for tif in sorted(use_tifs):
+            tifs = [f for f in d.rglob("*.tif*") if f.is_file()]
+            use_tifs = [Path(p) for p in select_sr_rasters(str(f) for f in sorted(tifs))]
+            for tif in use_tifs:
                 d_str = parse_date_from_filename(tif.name)
                 if d_str and d_str.startswith(str(season)):
                     found[d_str] = tif

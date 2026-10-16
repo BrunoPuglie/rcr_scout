@@ -108,9 +108,10 @@ Google Earth Engine requires each user to have their own Google Cloud Project ID
 ### Step 3: Provide PlanetScope Imagery
 You need 8-band Surface Reflectance PlanetScope SuperDove GeoTIFFs (`PSScene` / `ortho_analytic_8b_sr`) covering the field:
 
-- **Option A: Upload Downloaded GeoTIFFs (.tif, .tiff) or Order ZIP (.zip)**
+- **Option A: Upload the Planet order ZIP (.zip)**
   - If you download your images directly from [Planet Explorer](https://www.planet.com/explorer/):
-  - Drag and drop one or multiple `.tif` / `.tiff` files, or upload the complete `.zip` order archive directly. The platform will automatically unpack and stage all valid GeoTIFFs.
+  - Upload the `.zip` file exactly as downloaded from Planet; there's no need to unzip it. You can also drop the unzipped files.
+  - Each date in a Planet order comes with several files (`.json` and `.xml` metadata, a `udm2` cloud-mask GeoTIFF and the image itself). The platform automatically keeps only the 8-band Surface Reflectance image (`*_AnalyticMS_SR_8b_harmonized_clip.tif`) and lists the other files it ignored.
   - You can upload a single image (which will be evaluated using its own canopy mask) or a multi-date time series.
 - **Option B: Personal Planet API Key (Auto-Search & Order)**
   - Enter your Planet API key (found in [Planet account settings](https://www.planet.com/account/)).
